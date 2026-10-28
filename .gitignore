@@ -1,0 +1,25 @@
+# 비밀값: 실제 환경변수 파일은 올리지 않고, 키 이름만 담은 예시 파일만 허용
+.env*
+!.env.example
+
+# Vercel 프로젝트 연결 정보
+.vercel/
+
+# 내부 설계 메모 (저장소에는 올리지 않음)
+SPEC.md
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 에디터·OS·도구
+.vscode/
+.idea/
+.claude/
+.DS_Store

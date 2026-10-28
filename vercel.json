@@ -1,0 +1,10 @@
+{
+  "framework": null,
+  "regions": ["icn1"],
+  "rewrites": [
+    { "source": "/", "destination": "/api/start" },
+    { "source": "/callback", "destination": "/api/callback" },
+    { "source": "/qr", "destination": "/api/qr" },
+    { "source": "/reason", "destination": "/api/reason" }
+  ]
+}
