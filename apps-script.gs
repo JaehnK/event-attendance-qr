@@ -1,7 +1,9 @@
 /**
  * 출석 웹앱 — 출석 관리 스프레드시트에 바인딩(확장 프로그램 → Apps Script)해서 사용.
  * 스크립트 속성: TOKEN = Vercel 의 GAS_TOKEN 과 같은 값
- * 최초 1회: 편집기에서 setupTrigger 실행 → 5분마다 markAbsent 로 미출석자 자동 결석 처리
+ * 최초 1회: 편집기에서 setupTrigger 실행 → 5분마다 markAbsent 가
+ *   ① 오늘 회차의 학습자별 빈 행을 미리 만들고 ② 마감 지난 회차의 빈 행을 결석(무단) 처리.
+ * 시트 메뉴 "출석 → 앞으로 7일 회차 명단 생성": 공가·사전 결석을 미리 체크할 수 있게 행을 먼저 만든다.
  *
  * 열은 1행 헤더 이름으로 찾는다 (순서 무관, 공백 무시).
  *  학습자명단  : user_id | user_login | 이름 | 기수
@@ -11,7 +13,8 @@
  *  (비고 는 선택. 있으면 같은 브라우저로 여러 계정이 출석한 경우 "기기 중복: <계정>" 을 양쪽 행에 남김)
  *
  * 판정(스캔 시각 기준): 출석인정시간까지 출석, 지각인정시간까지 지각, 그 이후 결석(무단)+사유 입력.
- *       지각인정시간 + 30분이 지나면 기록이 없는 학습자 전원을 결석(무단)으로 추가.
+ *       스캔은 미리 만든 내 행에 상태·출석시각을 채운다. 관리자가 미리 체크한 상태는 덮어쓰지 않는다.
+ *       지각인정시간 + 30분이 지나면 상태가 빈 행을 결석(무단)으로 체크.
  */
 const TZ = 'Asia/Seoul';
 const LEARNERS = '학습자명단';
@@ -22,6 +25,7 @@ const ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
 const ABSENT_AFTER_MIN = 30;
 const REASON_MAX = 200;
 const SCAN_MAX_AGE_SEC = 15 * 60; // 스캔 시각 허용 범위 (Vercel 로그인 흐름 쿠키 10분 + 여유)
+const PREFILL_DAYS = 7; // 메뉴로 미리 만드는 기간
 
 // 상태 체크박스 열 (공백 제거한 헤더로 판별)
 const STATUS = {
@@ -107,10 +111,11 @@ function checkin_(req) {
   const row = rec.t.display[i];
   const status = rowStatus_(rec, rec.t.values[i]);
   const reasonEmpty = !row[rec.c.reason].trim();
-  if (status === 'absent' && !row[rec.c.time].trim()) {
-    // 자동 결석 행: 스캔 시각을 남기고, 스캔이 마감 전이었다면 그 상태로 정정
+  const timeEmpty = !row[rec.c.time].trim();
+  // 미리 만든 빈 행, 또는 자동 결석 행(출석시각 없음): 스캔 시각 기준 상태로 채운다
+  if (status === 'none' || (status === 'absent' && timeEmpty)) {
     setText_(rec.t.sh.getRange(i + 2, rec.c.time + 1), time);
-    if (scanStatus !== 'absent') setStatus_(rec, i, scanStatus);
+    if (scanStatus !== status) setStatus_(rec, i, scanStatus);
     return Object.assign(base, {
       result: 'recorded',
       status: scanStatus,
@@ -119,11 +124,13 @@ function checkin_(req) {
       reason_needed: scanStatus === 'absent' && reasonEmpty,
     });
   }
+  // 이미 처리된 행(관리자가 미리 공가 등 체크 포함): 상태는 그대로, 출석시각만 비어 있으면 남긴다
+  if (timeEmpty) setText_(rec.t.sh.getRange(i + 2, rec.c.time + 1), time);
   return Object.assign(base, {
     result: 'dup',
     status: status,
     label: rec.label[status] || '',
-    time: row[rec.c.time].trim(),
+    time: timeEmpty ? time : row[rec.c.time].trim(),
     reason_needed: status === 'absent' && reasonEmpty,
   });
 }
@@ -142,38 +149,76 @@ function reason_(req) {
   return { ok: true, saved: true };
 }
 
-/** 시간 트리거: 지각인정시간 + 30분이 지난 오늘 회차에서 기록 없는 학습자 → 결석(무단). */
+/** 시간 트리거(5분): 오늘 회차 빈 행 생성 → 지각인정시간 + 30분 지난 회차의 빈 행을 결석(무단). */
 function markAbsent() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) return;
   try {
+    const todays = todaySessions_();
+    if (!todays.length) return;
+    prefill_(todays);
     const m = minutesOf_(new Date());
-    const due = todaySessions_().filter((s) => m >= s.late + ABSENT_AFTER_MIN);
-    if (!due.length) return;
-    const people = learners_();
+    const due = new Set(todays.filter((s) => m >= s.late + ABSENT_AFTER_MIN).map((s) => s.id));
+    if (!due.size) return;
     const rec = records_();
-    const seen = new Set(rec.t.display.map((r) => key_(r[rec.c.id], r[rec.c.login])));
-    const items = [];
-    due.forEach((s) =>
-      people.forEach((who) => {
-        const k = key_(s.id, who.login);
-        if (seen.has(k)) return;
-        seen.add(k);
-        items.push({ who: who, s: s, status: 'absent', time: '' });
-      })
-    );
-    if (items.length) append_(rec, items);
+    rec.t.display.forEach((r, i) => {
+      if (due.has(r[rec.c.id].trim()) && rowStatus_(rec, rec.t.values[i]) === 'none') {
+        setStatus_(rec, i, 'absent');
+      }
+    });
   } finally {
     lock.releaseLock();
   }
 }
 
-/** 편집기에서 1회 실행: markAbsent 5분 주기 트리거 등록 (중복 제거). */
+/** 시트 메뉴: 오늘부터 PREFILL_DAYS 일 안의 회차 행을 미리 만든다. */
+function prefillUpcoming() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  let n;
+  try {
+    const from = today_();
+    const to = Utilities.formatDate(new Date(Date.now() + PREFILL_DAYS * 86400000), TZ, 'yyyy-MM-dd');
+    n = prefill_(sessionsBetween_(from, to));
+  } finally {
+    lock.releaseLock();
+  }
+  SpreadsheetApp.getActiveSpreadsheet().toast(n + '개 행을 만들었습니다.', '출석 명단 생성');
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('출석')
+    .addItem('앞으로 ' + PREFILL_DAYS + '일 회차 명단 생성', 'prefillUpcoming')
+    .addToUi();
+}
+
+/** 회차 × 학습자 중 행이 없는 조합만 상태가 빈 행으로 추가 (회차별, 명단 순서). 추가한 행 수. */
+function prefill_(sessions) {
+  if (!sessions.length) return 0;
+  const people = learners_();
+  const rec = records_();
+  const seen = new Set(rec.t.display.map((r) => key_(r[rec.c.id], r[rec.c.login])));
+  const items = [];
+  sessions.forEach((s) =>
+    people.forEach((who) => {
+      const k = key_(s.id, who.login);
+      if (seen.has(k)) return;
+      seen.add(k);
+      items.push({ who: who, s: s, status: 'none', time: '' });
+    })
+  );
+  if (items.length) append_(rec, items);
+  return items.length;
+}
+
+/** 편집기에서 1회 실행: markAbsent 5분 주기 트리거 등록 (중복 제거). 바로 한 번 실행해 오늘 행도 만든다. */
 function setupTrigger() {
   ScriptApp.getProjectTriggers()
     .filter((t) => t.getHandlerFunction() === 'markAbsent')
     .forEach((t) => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('markAbsent').timeBased().everyMinutes(5).create();
+  markAbsent();
 }
 
 // ---------- 시트 읽기 ----------
@@ -205,8 +250,18 @@ function need_(t, h) {
   return i;
 }
 
-/** 오늘(Asia/Seoul) 회차. 시간 셀은 표시값으로 읽는다 (1899년 시간대 오차 회피). */
+function today_() {
+  return Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd');
+}
+
+/** 오늘(Asia/Seoul) 회차. */
 function todaySessions_() {
+  const d = today_();
+  return sessionsBetween_(d, d);
+}
+
+/** 회차일자가 from~to(yyyy-MM-dd, 포함)인 회차. 시간 셀은 표시값으로 읽는다 (1899년 시간대 오차 회피). */
+function sessionsBetween_(from, to) {
   const t = table_(SESSIONS);
   const c = {
     event: need_(t, '행사ID'),
@@ -217,11 +272,11 @@ function todaySessions_() {
     late: need_(t, '지각인정시간'),
     round: t.col('차수'),
   };
-  const today = Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd');
   const out = [];
   t.display.forEach((r) => {
     const id = r[c.id].trim();
-    if (!ID_RE.test(id) || ymd_(r[c.date]) !== today) return;
+    const date = ymd_(r[c.date]);
+    if (!ID_RE.test(id) || !date || date < from || date > to) return;
     const att = hm_(r[c.att]);
     const late = hm_(r[c.late]);
     if (att === null || late === null) {
@@ -232,7 +287,7 @@ function todaySessions_() {
       eventId: r[c.event].trim(),
       id: id,
       title: r[c.title].trim(),
-      date: today,
+      date: date,
       round: c.round >= 0 ? r[c.round].trim() : '',
       att: att,
       late: Math.max(att, late),
