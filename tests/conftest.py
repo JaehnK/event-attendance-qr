@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 import _common
+import admin_callback
 import callback
 import qr
 import reason
@@ -101,7 +102,6 @@ class FakeIntra:
         default_factory=lambda: {
             "code-alice": ("alice", "Alice Kim"),
             "code-bob": ("bob", "Bob <script>alert(1)</script>"),
-            "code-admin": ("admin1", "Admin One"),
         }
     )
     calls: list[str] = field(default_factory=list)
@@ -170,9 +170,11 @@ class Client:
                 self.jar[name] = value
         return resp
 
-    def state_from(self, resp: Response) -> str:
+    def state_from(
+        self, resp: Response, auth: str = "https://api.intra.42.fr/oauth/authorize?"
+    ) -> str:
         assert resp.status == 302
-        assert resp.location.startswith("https://api.intra.42.fr/oauth/authorize?")
+        assert resp.location.startswith(auth)
         return urllib.parse.parse_qs(urllib.parse.urlsplit(resp.location).query)["state"][0]
 
 
@@ -186,7 +188,9 @@ def env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
         "GAS_TOKEN": "gas-token-value",
         "SESSION_SECRET": SECRET,
         "BASE_URL": "https://example.vercel.app",
-        "ADMIN_LOGINS": " Admin1 , other ",
+        "ADMIN_EMAILS": " Admin@GSIA.kr , other@gsia.kr ",
+        "GOOGLE_CLIENT_ID": "gid.apps.googleusercontent.com",
+        "GOOGLE_CLIENT_SECRET": "google-secret-value",
     }
     for k, v in values.items():
         monkeypatch.setenv(k, v)
@@ -207,13 +211,43 @@ def intra(monkeypatch: pytest.MonkeyPatch) -> FakeIntra:
     return fake
 
 
+@dataclass
+class FakeGoogle:
+    """인가 코드 → 확인된 이메일. 없는 코드는 Google 오류."""
+
+    users: dict[str, str] = field(
+        default_factory=lambda: {
+            "g-admin": "admin@gsia.kr",
+            "g-student": "student@gsia.kr",
+            "g-alice-intra": "alice@student.42seoul.kr",
+        }
+    )
+    calls: list[str] = field(default_factory=list)
+
+    def __call__(self, code: str) -> str:
+        self.calls.append(code)
+        if code not in self.users:
+            raise _common.UpstreamError
+        return self.users[code]
+
+
 @pytest.fixture
-def client(env: pytest.MonkeyPatch, gas: FakeGas, intra: FakeIntra) -> Iterator[Client]:
+def google(monkeypatch: pytest.MonkeyPatch) -> FakeGoogle:
+    fake = FakeGoogle()
+    monkeypatch.setattr(_common, "google_email", fake)
+    return fake
+
+
+@pytest.fixture
+def client(
+    env: pytest.MonkeyPatch, gas: FakeGas, intra: FakeIntra, google: FakeGoogle
+) -> Iterator[Client]:
     servers = {
         "/": ThreadingHTTPServer(("127.0.0.1", 0), start.handler),
         "/callback": ThreadingHTTPServer(("127.0.0.1", 0), callback.handler),
         "/qr": ThreadingHTTPServer(("127.0.0.1", 0), qr.handler),
         "/reason": ThreadingHTTPServer(("127.0.0.1", 0), reason.handler),
+        "/admin/callback": ThreadingHTTPServer(("127.0.0.1", 0), admin_callback.handler),
     }
     for s in servers.values():
         threading.Thread(target=s.serve_forever, args=(0.01,), daemon=True).start()

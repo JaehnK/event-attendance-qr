@@ -10,7 +10,7 @@ from email.message import Message
 import pytest
 
 import _common
-from conftest import SECRET, Client, FakeGas, FakeIntra, Response
+from conftest import SECRET, Client, FakeGas, FakeGoogle, FakeIntra, Response
 
 
 def qr_path(event_id: str, sig: str | None = None, window: int | None = None) -> str:
@@ -51,7 +51,7 @@ def test_student_checkin_success(client: Client, gas: FakeGas) -> None:
     assert list(gas.rows) == [("day1-am", "alice")]
     assert gas.rows["day1-am", "alice"]["status"] == "present"
     # 사용한 흐름 쿠키 만료
-    for name in ("st", "ev", "am"):
+    for name in ("st", "ev"):
         assert "Max-Age=0" in (r.cookie(name) or "")
 
 
@@ -115,7 +115,7 @@ def test_qr_rotation_window(client: Client, gas: FakeGas) -> None:
 
 
 def test_qr_page_error_keeps_refreshing(client: Client, monkeypatch: pytest.MonkeyPatch) -> None:
-    client.jar["adm"] = _common.admin_session_cookie("admin1")
+    client.jar["adm"] = _common.admin_session_cookie("admin@gsia.kr")
 
     def boom(_: object) -> None:
         raise _common.UpstreamError
@@ -361,31 +361,38 @@ def test_device_cookie_not_set_when_not_recorded(client: Client, gas: FakeGas) -
     assert r.cookie("dv") is None
 
 
-# ---------- 관리자 ----------
+# ---------- 관리자 (Google) ----------
+
+GOOGLE = "https://accounts.google.com/o/oauth2/v2/auth?"
 
 
-def admin_login(client: Client, code: str = "code-admin") -> tuple[Response, Response]:
+def admin_login(client: Client, code: str = "g-admin") -> tuple[Response, Response]:
     r = client.get("/qr")
-    state = client.state_from(r)
-    return r, client.get(f"/callback?code={code}&state={state}")
+    state = client.state_from(r, GOOGLE)
+    return r, client.get(f"/admin/callback?code={code}&state={state}")
 
 
-def test_admin_login_and_qr(client: Client, gas: FakeGas) -> None:
+def test_admin_login_and_qr(client: Client, gas: FakeGas, intra: FakeIntra) -> None:
     r, cb = admin_login(client)
-    am = r.cookie("am")
-    assert am is not None
-    assert "HttpOnly" in am
-    assert "Secure" in am
-    assert "SameSite=Lax" in am
-    assert "Max-Age=0" in (r.cookie("ev") or "")
+    q = urllib.parse.parse_qs(urllib.parse.urlsplit(r.location).query)
+    assert q["client_id"] == ["gid.apps.googleusercontent.com"]
+    assert q["redirect_uri"] == ["https://example.vercel.app/admin/callback"]
+    assert q["scope"] == ["openid email"]
+    ast = r.cookie("ast")
+    assert ast is not None
+    for attr in ("Max-Age=600", "HttpOnly", "Secure", "SameSite=Lax", "Path=/"):
+        assert attr in ast
+    assert r.cookie("st") is None  # 학생 state 쿠키는 건드리지 않음
 
     assert cb.status == 302
     assert cb.location == "/qr"
+    assert "Max-Age=0" in (cb.cookie("ast") or "")
     adm = cb.cookie("adm")
     assert adm is not None
     for attr in ("Max-Age=3600", "HttpOnly", "Secure", "SameSite=Lax", "Path=/"):
         assert attr in adm
-    # 관리자 로그인은 출석을 기록하지 않는다
+    # 관리자 로그인은 42·출석과 무관
+    assert intra.calls == []
     assert all(call["action"] != "checkin" for call in gas.calls)
     assert not gas.rows
 
@@ -393,13 +400,14 @@ def test_admin_login_and_qr(client: Client, gas: FakeGas) -> None:
     assert page.status == 200
     assert page.headers["Cache-Control"] == "no-store"
     assert "<svg" in page.body
+    assert "admin@gsia.kr" in page.body
     assert "오전 세션 1차" in page.body
     assert "출석 ~09:00" in page.body
     assert "지각 ~09:10" in page.body
     assert f'<meta http-equiv="refresh" content="{_common.QR_REFRESH}">' in page.body
-    assert 'viewBox="' in page.body  # 크기 고정 없이 CSS로 맞춰 가운데 정렬
+    assert 'viewBox="' in page.body
     assert "어제 세션" not in page.body
-    assert "<img" not in page.body  # 이벤트명 이스케이프
+    assert "<img" not in page.body  # 회차명 이스케이프
     w = _common.qr_window()
     sigs = {f"t={x}&amp;s={_common.qr_sig('day1-am', x)}" for x in (w, w - 1)}
     assert any(f"https://example.vercel.app/?e=day1-am&amp;{x}" in page.body for x in sigs)
@@ -409,22 +417,50 @@ def test_admin_session_payload(client: Client) -> None:
     admin_login(client)
     body, _, sig = client.jar["adm"].partition(".")
     data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
-    assert data["login"] == "admin1"
+    assert data["email"] == "admin@gsia.kr"
     assert data["role"] == "admin"
     assert 3500 < data["exp"] - time.time() <= 3600
     assert len(sig) == 64
 
 
-def test_non_admin_gets_403_and_no_checkin(client: Client, gas: FakeGas) -> None:
-    _, cb = admin_login(client, "code-alice")
+@pytest.mark.parametrize("code", ["g-student", "g-alice-intra"])
+def test_non_admin_google_account_gets_403(client: Client, gas: FakeGas, code: str) -> None:
+    _, cb = admin_login(client, code)
     assert cb.status == 403
-    assert cb.cookie("adm") is None or "Max-Age=0" in (cb.cookie("adm") or "")
-    assert gas.calls == []
+    assert "Max-Age=0" in (cb.cookie("adm") or "")
     assert "adm" not in client.jar
-    # 여전히 QR 볼 수 없음 → 다시 로그인으로
-    r = client.get("/qr")
-    assert r.status == 302
-    assert "오전 세션" not in r.body
+    assert gas.calls == []
+    assert client.get("/qr").status == 302
+
+
+def test_google_error_is_generic_502(client: Client) -> None:
+    _, cb = admin_login(client, "unknown")
+    assert cb.status == 502
+    assert "adm" not in client.jar
+
+
+def test_admin_state_mismatch_and_cancel(client: Client, google: FakeGoogle) -> None:
+    client.get("/qr")
+    assert client.get("/admin/callback?code=g-admin&state=forged").status == 400
+    # 학생용 st 쿠키로는 관리자 콜백 통과 불가
+    state = client.state_from(client.get(qr_path("day1-am")))
+    client.jar.pop("ast", None)
+    assert client.get(f"/admin/callback?code=g-admin&state={state}").status == 400
+    state = client.state_from(client.get("/qr"), GOOGLE)
+    r = client.get(f"/admin/callback?error=access_denied&state={state}")
+    assert r.status == 400
+    assert google.calls == []
+    assert "adm" not in client.jar
+
+
+def test_admin_flow_does_not_touch_student_flow(client: Client, gas: FakeGas) -> None:
+    # 학생 QR 스캔 중 관리자 로그인을 해도 학생 흐름은 그대로 유효
+    state = client.state_from(client.get(qr_path("day1-am")))
+    admin_login(client)
+    r = client.get(f"/callback?code=code-alice&state={state}")
+    assert r.status == 200
+    assert "출석 완료" in r.body
+    assert len(gas.rows) == 1
 
 
 def test_qr_requires_login(client: Client, gas: FakeGas) -> None:
@@ -432,7 +468,7 @@ def test_qr_requires_login(client: Client, gas: FakeGas) -> None:
     assert r.status == 302
     assert r.headers["Cache-Control"] == "no-store"
     assert r.body == ""
-    assert gas.calls == []  # 비인증 상태에서 이벤트 조회 안 함
+    assert gas.calls == []  # 비인증 상태에서 회차 조회 안 함
 
 
 def _forge(data: dict) -> str:
@@ -441,36 +477,26 @@ def _forge(data: dict) -> str:
 
 
 @pytest.mark.parametrize(
-    "cookie",
-    [
-        "garbage",
-        "",
-        # 서명 없는 페이로드
-        _forge({"login": "admin1", "exp": int(time.time()) + 999, "role": "admin"}) + ".00",
-        # 다른 비밀키로 서명
-        "WRONG",
-        # 만료
-        "EXPIRED",
-        # role 누락
-        "NOROLE",
-        # 다른 용도(mode) 쿠키 재사용
-        "MODE",
-    ],
+    "cookie", ["garbage", "", "UNSIGNED", "WRONG", "EXPIRED", "NOROLE", "OTHER-PURPOSE", "OLD-42"]
 )
 def test_forged_or_expired_adm_cookie(
     client: Client, gas: FakeGas, env: pytest.MonkeyPatch, cookie: str
 ) -> None:
     now = int(time.time())
-    if cookie == "WRONG":
+    if cookie == "UNSIGNED":
+        cookie = _forge({"email": "admin@gsia.kr", "exp": now + 999, "role": "admin"}) + ".00"
+    elif cookie == "WRONG":
         env.setenv("SESSION_SECRET", "another-secret")
-        cookie = _common.admin_session_cookie("admin1")
+        cookie = _common.admin_session_cookie("admin@gsia.kr")
         env.setenv("SESSION_SECRET", SECRET)
     elif cookie == "EXPIRED":
-        cookie = _common.seal("adm", {"login": "admin1", "exp": now - 1, "role": "admin"})
+        cookie = _common.seal("adm", {"email": "admin@gsia.kr", "exp": now - 1, "role": "admin"})
     elif cookie == "NOROLE":
-        cookie = _common.seal("adm", {"login": "admin1", "exp": now + 999})
-    elif cookie == "MODE":
-        cookie = _common.admin_mode_cookie("x")
+        cookie = _common.seal("adm", {"email": "admin@gsia.kr", "exp": now + 999})
+    elif cookie == "OTHER-PURPOSE":
+        cookie = _common.reason_token("alice", "day1-am")
+    elif cookie == "OLD-42":  # 이전 버전의 인트라 로그인 세션
+        cookie = _common.seal("adm", {"login": "admin1", "exp": now + 999, "role": "admin"})
     client.jar["adm"] = cookie
     r = client.get("/qr")
     assert r.status == 302  # 재로그인 유도
@@ -478,10 +504,12 @@ def test_forged_or_expired_adm_cookie(
     assert gas.calls == []
 
 
-def test_tampered_login_in_adm_cookie(client: Client, gas: FakeGas) -> None:
+def test_tampered_email_in_adm_cookie(client: Client) -> None:
+    client.jar["adm"] = _common.admin_session_cookie("student@gsia.kr")
+    assert client.get("/qr").status == 302
     admin_login(client)
-    _, _, sig = client.jar["adm"].partition(".")
-    payload = _forge({"login": "admin1", "exp": int(time.time()) + 99999, "role": "admin"})
+    sig = client.jar["adm"].partition(".")[2]
+    payload = _forge({"email": "admin@gsia.kr", "exp": int(time.time()) + 99999, "role": "admin"})
     client.jar["adm"] = f"{payload}.{sig}"
     assert client.get("/qr").status == 302
 
@@ -489,67 +517,67 @@ def test_tampered_login_in_adm_cookie(client: Client, gas: FakeGas) -> None:
 def test_removed_admin_session_invalid(client: Client, env: pytest.MonkeyPatch) -> None:
     admin_login(client)
     assert client.get("/qr").status == 200
-    env.setenv("ADMIN_LOGINS", "other")
+    env.setenv("ADMIN_EMAILS", "other@gsia.kr")
     assert client.get("/qr").status == 302
 
 
 @pytest.mark.parametrize("value", [None, "", " , "])
-def test_admin_logins_unset_denies_all(
-    client: Client, env: pytest.MonkeyPatch, intra: FakeIntra, gas: FakeGas, value: str | None
+def test_admin_emails_unset_denies_all(
+    client: Client, env: pytest.MonkeyPatch, google: FakeGoogle, gas: FakeGas, value: str | None
 ) -> None:
-    # 미리 유효한 세션·관리자 모드 쿠키를 확보해 둔 뒤 설정을 비운다
-    client.jar["adm"] = _common.admin_session_cookie("admin1")
-    r = client.get("/qr")
-    assert r.status == 200
-    state = "s" * 32
-    client.jar["st"] = state
-    client.jar["am"] = _common.admin_mode_cookie(state)
-
+    client.jar["adm"] = _common.admin_session_cookie("admin@gsia.kr")
+    assert client.get("/qr").status == 200
     if value is None:
-        env.delenv("ADMIN_LOGINS")
+        env.delenv("ADMIN_EMAILS")
     else:
-        env.setenv("ADMIN_LOGINS", value)
-
+        env.setenv("ADMIN_EMAILS", value)
+    gas.calls.clear()
     r = client.get("/qr")
     assert r.status == 403
     assert "오전 세션" not in r.body
-    gas.calls.clear()
-    client.jar["st"] = state
-    client.jar["am"] = _common.admin_mode_cookie(state)
-    cb = client.get(f"/callback?code=code-admin&state={state}")
+    st = "s" * 32
+    client.jar["ast"] = st
+    cb = client.get(f"/admin/callback?code=g-admin&state={st}")
     assert cb.status == 403
-    assert cb.cookie("adm") is not None
     assert "Max-Age=0" in (cb.cookie("adm") or "")
+    assert google.calls == []
     assert gas.calls == []
 
 
-def test_student_opening_qr_cannot_become_admin_or_check_in(client: Client, gas: FakeGas) -> None:
-    # 학생이 QR 스캔 후 /qr 도 열었다면, 마지막 흐름(관리자 모드)만 유효
-    client.get(qr_path("day1-am"))
-    r = client.get("/qr")
-    state = client.state_from(r)
-    cb = client.get(f"/callback?code=code-alice&state={state}")
-    assert cb.status == 403
-    assert not gas.rows
-
-
-def test_stale_admin_mode_cookie_does_not_hijack_student_flow(client: Client, gas: FakeGas) -> None:
-    # 관리자 모드 쿠키가 남아 있어도 state 에 묶여 있으므로 학생 흐름은 정상 출석
-    client.get("/qr")
-    stale_am = client.jar["am"]
-    state = client.state_from(client.get(qr_path("day1-am")))
-    client.jar["am"] = stale_am
-    r = client.get(f"/callback?code=code-alice&state={state}")
-    assert r.status == 200
-    assert "출석 완료" in r.body
-    assert len(gas.rows) == 1
-
-
-def test_admin_cookie_is_not_event_signature(env: pytest.MonkeyPatch) -> None:
-    # 이벤트 서명(HMAC(id))과 쿠키 서명(HMAC("adm:"+body))은 도메인 분리
-    body = _forge({"login": "admin1", "exp": int(time.time()) + 999, "role": "admin"})
+def test_admin_cookie_domain_separation(env: pytest.MonkeyPatch) -> None:
+    # 쿠키 서명은 HMAC("<용도>:"+body) — 접두사 없는 서명이나 다른 용도 서명은 거부
+    body = _forge({"email": "admin@gsia.kr", "exp": int(time.time()) + 999, "role": "admin"})
     assert _common.unseal("adm", f"{body}.{_common._mac(body)}") is None
+    assert _common.unseal("adm", f"{body}.{_common._mac('rsn:' + body)}") is None
     assert _common.unseal("adm", f"{body}.{_common._mac('adm:' + body)}") is not None
+
+
+def test_google_email_wrapper(env: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list = []
+
+    def fake_request(url: str, *, data=None, headers=None, timeout=None):
+        calls.append((url, data, headers or {}))
+        if url == _common.GOOGLE_TOKEN:
+            return {"access_token": "tok", "id_token": "x"}
+        return {"email": "Admin@GSIA.kr", "email_verified": True}
+
+    monkeypatch.setattr(_common, "_request", fake_request)
+    assert _common.google_email("abc") == "admin@gsia.kr"
+    form = urllib.parse.parse_qs(calls[0][1].decode())
+    assert form["client_secret"] == ["google-secret-value"]
+    assert form["redirect_uri"] == ["https://example.vercel.app/admin/callback"]
+    assert calls[1][2]["Authorization"] == "Bearer tok"
+
+    for me in ({"email": "a@gsia.kr", "email_verified": False}, {"email": "nope"}, {}):
+        monkeypatch.setattr(
+            _common,
+            "_request",
+            lambda url, *, data=None, headers=None, timeout=None, me=me: (
+                {"access_token": "tok"} if url == _common.GOOGLE_TOKEN else me
+            ),
+        )
+        with pytest.raises(_common.UpstreamError):
+            _common.google_email("abc")
 
 
 # ---------- 외부 호출 래퍼 ----------
