@@ -76,7 +76,7 @@ function setup({ att, late, note = false, extraSessions = [] }) {
   };
   const toasts = [];
   const ctx = {
-    console: { ...console, warn() {} }, Utilities,
+    console: { ...console, warn() {}, error() {} }, Utilities,
     SpreadsheetApp: {
       getActiveSpreadsheet: () => ({ getSheetByName: (n) => sheets[n] || null, toast: (m) => toasts.push(m) }),
       flush() {},

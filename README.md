@@ -63,6 +63,14 @@
    - Google Workspace 계정은 조직 정책 때문에 외부 접근이 403으로 막힐 수 있습니다. 시크릿 창에서 `/exec`를 열어 "액세스 거부됨"이 뜨면 정책 문제입니다.
 5. 발급된 `/exec` URL을 복사합니다. 코드를 고친 뒤에는 "배포 관리 → 수정 → 새 버전"으로 갱신해야 URL이 유지됩니다.
 
+**코드 갱신 자동화 (clasp)**: 처음 배포한 뒤로는 저장소의 `apps-script.gs`만 고치고 아래 명령으로 올립니다. 하네스 테스트 → `clasp push` → 기존 배포(`.clasp.json`의 `deploymentId`)를 새 버전으로 갱신하므로 URL이 유지됩니다. 편집기에서 직접 고친 내용은 덮어써집니다.
+```sh
+npm i -g @google/clasp                 # 최초 1회
+"$(npm prefix -g)/bin/clasp" login --no-localhost   # 최초 1회 (/usr/bin/clasp 와 이름이 겹치면 전체 경로로)
+./scripts/deploy-gas.sh "변경 설명"
+```
+사전에 <https://script.google.com/home/usersettings>에서 Google Apps Script API를 켜야 합니다.
+
 ### 3. 42 앱 등록
 <https://profile.intra.42.fr/oauth/applications>에서 새 앱을 만듭니다.
 - Redirect URI: `https://<프로젝트>.vercel.app/callback`
