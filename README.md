@@ -71,6 +71,11 @@ npm i -g @google/clasp                 # 최초 1회
 ```
 사전에 <https://script.google.com/home/usersettings>에서 Google Apps Script API를 켜야 합니다.
 
+**clasp 로그인이 막힐 때**: Workspace 계정은 조직의 Google Cloud 세션 정책 때문에 `invalid_grant … invalid_rapt`가 나거나 동의 화면에서 무한 로딩이 걸릴 수 있습니다(재로그인해도 반복되면 관리자가 정책을 바꿔야 합니다). 이때는 clasp 없이 편집기로 올립니다.
+1. `./scripts/deploy-gas.sh`의 테스트 부분만 먼저 돌려 확인합니다: `node tests/apps_script_harness.js apps-script.gs`
+2. 시트 → 확장 프로그램 → Apps Script에서 코드 파일 전체를 `apps-script.gs` 내용으로 덮어쓰고 저장합니다.
+3. 배포 → 배포 관리 → 기존 웹앱 배포의 연필 아이콘 → 버전 **새 버전** → 배포. **새 배포를 만들면 `/exec` URL이 바뀌어** Vercel의 `GAS_URL`을 고쳐야 하므로 반드시 기존 배포를 수정합니다.
+
 ### 3. 42 앱 등록
 <https://profile.intra.42.fr/oauth/applications>에서 새 앱을 만듭니다.
 - Redirect URI: `https://<프로젝트>.vercel.app/callback`

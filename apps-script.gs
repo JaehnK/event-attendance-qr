@@ -26,6 +26,8 @@ const ABSENT_AFTER_MIN = 30;
 const REASON_MAX = 200;
 const SCAN_MAX_AGE_SEC = 15 * 60; // 스캔 시각 허용 범위 (Vercel 로그인 흐름 쿠키 10분 + 여유)
 const PREFILL_DAYS = 7; // 메뉴로 미리 만드는 기간
+const RETRY_MAX = 3; // 시간 트리거 일시 오류 재시도 (총 시도 횟수)
+const RETRY_WAIT_MS = 2000; // 재시도 간격 (시도 횟수만큼 곱해 늘어남)
 
 // 상태 체크박스 열 (공백 제거한 헤더로 판별)
 const STATUS = {
@@ -149,25 +151,57 @@ function reason_(req) {
   return { ok: true, saved: true };
 }
 
-/** 시간 트리거(5분): 오늘 회차 빈 행 생성 → 지각인정시간 + 30분 지난 회차의 빈 행을 결석(무단). */
+/**
+ * 시간 트리거(5분): 오늘 회차 빈 행 생성 → 지각인정시간 + 30분 지난 회차의 빈 행을 결석(무단).
+ * 구글 쪽 일시 오류("server error")는 재시도한다. 몇 번 해도 안 되면 그대로 던져 실패 알림이 가게 한다.
+ */
 function markAbsent() {
+  withRetry_('markAbsent', markAbsentOnce_);
+}
+
+/** 몇 번을 다시 실행해도 결과가 같다 (이미 있는 행은 건너뛰고, 상태가 빈 행만 결석 처리). */
+function markAbsentOnce_() {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) return;
+  if (!lock.tryLock(30000)) {
+    console.warn('markAbsent: 락 대기 30초 초과, 이번 회차는 건너뜀');
+    return;
+  }
   try {
     const todays = todaySessions_();
     if (!todays.length) return;
-    prefill_(todays);
+    const added = prefill_(todays);
     const m = minutesOf_(new Date());
     const due = new Set(todays.filter((s) => m >= s.late + ABSENT_AFTER_MIN).map((s) => s.id));
-    if (!due.size) return;
-    const rec = records_();
-    rec.t.display.forEach((r, i) => {
-      if (due.has(r[rec.c.id].trim()) && rowStatus_(rec, rec.t.values[i]) === 'none') {
-        setStatus_(rec, i, 'absent');
-      }
-    });
+    let absent = 0;
+    if (due.size) {
+      const rec = records_();
+      const idxs = [];
+      rec.t.display.forEach((r, i) => {
+        if (due.has(r[rec.c.id].trim()) && rowStatus_(rec, rec.t.values[i]) === 'none') idxs.push(i);
+      });
+      setStatusRows_(rec, idxs, 'absent');
+      absent = idxs.length;
+    }
+    if (added || absent) console.log('markAbsent: 행 ' + added + '개 생성, 결석 ' + absent + '명 처리');
   } finally {
     lock.releaseLock();
+  }
+}
+
+/** 일시 오류용 재시도. 락은 fn 안에서 잡고 풀므로 대기 중에는 스캔 요청이 락을 쓸 수 있다. */
+function withRetry_(label, fn) {
+  const started = Date.now();
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return fn();
+    } catch (err) {
+      console.error(
+        label + ' 실패 ' + attempt + '/' + RETRY_MAX + ' (' + (Date.now() - started) + 'ms): ' +
+          ((err && err.stack) || err)
+      );
+      if (attempt >= RETRY_MAX) throw err;
+      Utilities.sleep(RETRY_WAIT_MS * attempt);
+    }
   }
 }
 
@@ -421,9 +455,26 @@ function addNote_(rec, i, text) {
 }
 
 function setStatus_(rec, i, status) {
-  Object.keys(STATUS).forEach((k) => {
-    const col = rec.c.status[k];
-    if (col >= 0) rec.t.sh.getRange(i + 2, col + 1).setValue(k === status);
+  setStatusRows_(rec, [i], status);
+}
+
+/** 여러 행의 상태를 한 번에. 연속한 행은 한 덩어리로 묶어 상태 열마다 setValues 한 번 (행마다 쓰면 느리다). */
+function setStatusRows_(rec, idxs, status) {
+  if (!idxs.length) return;
+  const runs = [];
+  idxs.forEach((i) => {
+    const last = runs[runs.length - 1];
+    if (last && last[1] === i - 1) last[1] = i;
+    else runs.push([i, i]);
+  });
+  runs.forEach((run) => {
+    const n = run[1] - run[0] + 1;
+    Object.keys(STATUS).forEach((k) => {
+      const col = rec.c.status[k];
+      if (col < 0) return;
+      const vals = Array.from({ length: n }, () => [k === status]);
+      rec.t.sh.getRange(run[0] + 2, col + 1, n, 1).setValues(vals);
+    });
   });
   SpreadsheetApp.flush();
 }

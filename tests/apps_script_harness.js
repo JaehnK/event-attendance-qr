@@ -19,6 +19,7 @@ const Utilities = {
     return f.replace('yyyy', p.year).replace('MM', p.month).replace('dd', p.day)
       .replace('HH', p.hour).replace('mm', p.minute).replace('ss', p.second);
   },
+  sleep() {},
 };
 
 function makeSheet(rows) {
@@ -76,7 +77,7 @@ function setup({ att, late, note = false, extraSessions = [] }) {
   };
   const toasts = [];
   const ctx = {
-    console: { ...console, warn() {}, error() {} }, Utilities,
+    console: { ...console, log() {}, warn() {}, error() {} }, Utilities,
     SpreadsheetApp: {
       getActiveSpreadsheet: () => ({ getSheetByName: (n) => sheets[n] || null, toast: (m) => toasts.push(m) }),
       flush() {},
@@ -239,6 +240,55 @@ check('shared device noted on both rows (비고), works without column', () => {
   assert.strictEqual(e.row('sooslee')[e.col('비고')], '기기 중복: jaehukim');
   assert.strictEqual(e.row('jaehukim')[e.col('비고')], '기기 중복: sooslee');
   assert.strictEqual(setup({ att: hm(min + 60), late: hm(min + 70) }).call({ action: 'checkin', login: 'sooslee', id: ID, shared: ['jaehukim'] }).result, 'recorded');
+});
+
+// ---------- 일시 오류 재시도 / 일괄 쓰기 ----------
+
+/** 시트 읽기를 n번 실패시키는 장치 ("server error" 흉내). */
+function failReads(sheet, times) {
+  const orig = sheet.getLastColumn;
+  let left = times;
+  sheet.getLastColumn = () => {
+    if (left-- > 0) throw new Error("We're sorry, a server error occurred. Please wait a bit and try again.");
+    return orig();
+  };
+  return () => times - Math.max(left, 0);
+}
+
+check('markAbsent retries transient errors, then succeeds', () => {
+  const { ctx, sheets, rows } = setup({ att: hm(min + 60), late: hm(min + 70) });
+  const fails = failReads(sheets['행사일정'], 2);
+  ctx.markAbsent();
+  assert.strictEqual(fails(), 2);
+  assert.deepStrictEqual(rows().map((r) => r[1]), ['jaehukim', 'sooslee', 'jinsecho']);
+});
+
+check('markAbsent rethrows after RETRY_MAX so failure mail still fires', () => {
+  const { ctx, sheets, rows } = setup({ att: hm(min + 60), late: hm(min + 70) });
+  failReads(sheets['행사일정'], 99);
+  assert.throws(() => ctx.markAbsent(), /server error/);
+  assert.strictEqual(rows().length, 0);
+});
+
+check('absent marking writes contiguous rows in one batch, skips checked rows', () => {
+  const e = setup({ att: hm(min + 60), late: hm(min + 70) });
+  e.ctx.markAbsent(); // prefill (마감 전)
+  e.row('sooslee')[e.col('공가')] = true; // 가운데 행을 미리 체크 → 구간이 둘로 갈라짐
+  e.sheets['행사일정'].cells[1][6] = hm(min - 50); e.sheets['행사일정'].cells[1][7] = hm(min - 40);
+  const sh = e.sheets['행사참여현황'];
+  const orig = sh.getRange;
+  let writes = 0;
+  sh.getRange = (...a) => {
+    const r = orig(...a);
+    const sv = r.setValues;
+    r.setValues = (v) => { writes++; return sv(v); };
+    return r;
+  };
+  e.ctx.markAbsent();
+  assert.deepStrictEqual(e.status(e.row('jaehukim')), ['결석(무단, 노쇼)']);
+  assert.deepStrictEqual(e.status(e.row('sooslee')), ['공가']);
+  assert.deepStrictEqual(e.status(e.row('jinsecho')), ['결석(무단, 노쇼)']);
+  assert.strictEqual(writes, 12); // 구간 2개 × 상태 열 6개 (행마다 쓰던 때는 행 수 × 6)
 });
 
 check('parsers + missing column → generic error', () => {
