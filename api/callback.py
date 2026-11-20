@@ -42,13 +42,24 @@ class handler(c.Handler):  # Vercel 규약: 클래스명 handler
             return
         event_id, scanned_at = target
         try:
-            login, name = c.intra_user(code)
+            login, name, host = c.intra_user(code)
         except Exception:
             self.message(
                 502,
                 "로그인 실패",
                 "42 로그인 처리 중 오류가 발생했습니다. 다시 시도해 주세요.",
                 CLEAR,
+            )
+            return
+        if host:
+            # 클러스터 자리에 로그인 중이면 시트까지 가지 않고 끝낸다 (아무것도 기록하지 않음)
+            self.message(
+                403,
+                "클러스터에 로그인 중입니다",
+                "클러스터에서 로그아웃한 뒤 QR을 다시 스캔해 주세요.",
+                CLEAR,
+                c.rows_html([("접속 중인 자리", c.esc(host))]),
+                mood="warn",
             )
             return
         # 같은 브라우저로 이 회차에 이미 출석한 다른 계정 (학생에게는 알리지 않고 시트 비고에만)

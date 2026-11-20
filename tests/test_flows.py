@@ -361,6 +361,44 @@ def test_device_cookie_not_set_when_not_recorded(client: Client, gas: FakeGas) -
     assert r.cookie("dv") is None
 
 
+# ---------- 클러스터 접속 차단 ----------
+
+
+def test_cluster_login_blocked_before_sheet(client: Client, gas: FakeGas, intra: FakeIntra) -> None:
+    intra.hosts["alice"] = "c1r2s3"
+    _, r = student_login(client, "day1-am", "code-alice")
+    assert r.status == 403
+    assert "클러스터에 로그인 중입니다" in r.body
+    assert "c1r2s3" in r.body
+    assert not gas.calls  # 시트(Apps Script)까지 가지 않는다
+    assert not gas.rows
+    assert r.cookie("dv") is None
+    for name in ("st", "ev"):
+        assert "Max-Age=0" in (r.cookie(name) or "")
+
+
+def test_cluster_block_then_logout_and_rescan_records(
+    client: Client, gas: FakeGas, intra: FakeIntra
+) -> None:
+    intra.hosts["alice"] = "c1r2s3"
+    _, blocked = student_login(client, "day1-am", "code-alice")
+    assert blocked.status == 403
+    del intra.hosts["alice"]  # 클러스터에서 로그아웃
+    _, r = student_login(client, "day1-am", "code-alice")
+    assert r.status == 200
+    assert "출석 완료" in r.body
+    assert "cluster" not in gas.calls[-1]
+    assert gas.rows["day1-am", "alice"]["status"] == "present"
+
+
+def test_cluster_host_is_escaped(client: Client, gas: FakeGas, intra: FakeIntra) -> None:
+    intra.hosts["alice"] = "<script>alert(1)</script>"
+    _, r = student_login(client, "day1-am", "code-alice")
+    assert r.status == 403
+    assert "<script>alert(1)" not in r.body
+    assert "&lt;script&gt;" in r.body
+
+
 # ---------- 관리자 (Google) ----------
 
 GOOGLE = "https://accounts.google.com/o/oauth2/v2/auth?"
@@ -612,7 +650,7 @@ def test_intra_user_wrapper(env: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyP
         return {"login": "Alice", "displayname": "Alice Kim"}
 
     monkeypatch.setattr(_common, "_request", fake_request)
-    assert _common.intra_user("abc") == ("alice", "Alice Kim")
+    assert _common.intra_user("abc") == ("alice", "Alice Kim", "")
     token_body = calls[0][1]
     assert token_body is not None
     form = urllib.parse.parse_qs(token_body.decode())
@@ -623,6 +661,42 @@ def test_intra_user_wrapper(env: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(_common, "_request", lambda *a, **k: {"login": "../evil"})
     with pytest.raises(_common.UpstreamError):
         _common.intra_user("abc")
+
+
+@pytest.mark.parametrize(
+    ("location", "host"),
+    [
+        ("c1r2s3", "c1r2s3"),  # 클러스터 접속 중
+        ("  c1r2s3 \n", "c1r2s3"),
+        ("x" * 100, "x" * 40),  # 화면·시트에 길게 흘러가지 않게 자름
+        (None, ""),  # 접속 중 아님
+        ("", ""),
+        (3, ""),  # 예상 밖 타입은 접속으로 보지 않는다 (제한하지 않는 쪽)
+        ({"host": "c1r2s3"}, ""),
+    ],
+)
+def test_intra_user_reads_cluster_location(
+    env: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch, location: object, host: str
+) -> None:
+    def fake_request(url: str, *, data=None, headers=None):
+        if url.endswith("/oauth/token"):
+            return {"access_token": "tok"}
+        return {"login": "alice", "displayname": "Alice Kim", "location": location}
+
+    monkeypatch.setattr(_common, "_request", fake_request)
+    assert _common.intra_user("abc").host == host
+
+
+def test_intra_user_without_location_field(
+    env: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_request(url: str, *, data=None, headers=None):
+        if url.endswith("/oauth/token"):
+            return {"access_token": "tok"}
+        return {"login": "alice"}  # location 키 자체가 없어도 오류 없이 접속 중 아님
+
+    monkeypatch.setattr(_common, "_request", fake_request)
+    assert _common.intra_user("abc") == ("alice", "alice", "")
 
 
 def test_request_rejects_non_https(env: pytest.MonkeyPatch) -> None:

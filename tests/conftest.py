@@ -104,13 +104,16 @@ class FakeIntra:
             "code-bob": ("bob", "Bob <script>alert(1)</script>"),
         }
     )
+    # login → 접속 중인 클러스터 자리 (없으면 접속 중 아님)
+    hosts: dict[str, str] = field(default_factory=dict)
     calls: list[str] = field(default_factory=list)
 
-    def __call__(self, code: str) -> tuple[str, str]:
+    def __call__(self, code: str) -> _common.IntraUser:
         self.calls.append(code)
         if code not in self.users:
             raise _common.UpstreamError
-        return self.users[code]
+        login, name = self.users[code]
+        return _common.IntraUser(login, name, self.hosts.get(login, ""))
 
 
 @dataclass
