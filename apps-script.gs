@@ -7,7 +7,8 @@
  *
  * 열은 1행 헤더 이름으로 찾는다 (순서 무관, 공백 무시).
  *  학습자명단  : user_id | user_login | 이름 | 기수
- *  행사일정    : 행사ID | 회차ID | 행사명 | 회차일자 | 출석인정시간 | 지각인정시간 | 차수
+ *  행사일정    : 행사ID | 회차ID | 행사명 | 회차일자 | 출석인정시간 | 지각인정시간 | 차수 | 클러스터접속제한
+ *               (클러스터접속제한 은 선택. Y/TRUE/체크면 그 회차는 클러스터에 접속 중인 학습자의 출석을 기록하지 않는다)
  *  행사참여현황: user_id | user_login | 이름 | 기수 | 행사ID | 행사명 | 회차ID | 회차일자 | 차수
  *               | 출석 | 지각 | 공가 | 결석(사전…) | 결석(무단…) | 중도포기 | 출석시각 | 사유 | 비고
  *  (비고 는 선택. 있으면 같은 브라우저로 여러 계정이 출석한 경우 "기기 중복: <계정>" 을 양쪽 행에 남김)
@@ -94,6 +95,11 @@ function checkin_(req) {
   const base = { ok: true, name: sessionName_(s) };
   const i = findRecord_(rec, id, login);
 
+  // 클러스터 접속 제한 회차: 이 스캔이 출석을 채우게 될 때만 막는다 (이미 처리된 행은 아래에서 그대로 dup)
+  if (req.cluster === true && s.restrict && (i < 0 || fillable_(rec, i))) {
+    return { ok: true, result: 'blocked_cluster', name: sessionName_(s) };
+  }
+
   flagShared_(rec, id, login, shared);
   const note = shared.length ? '기기 중복: ' + shared.join(', ') : '';
 
@@ -115,7 +121,7 @@ function checkin_(req) {
   const reasonEmpty = !row[rec.c.reason].trim();
   const timeEmpty = !row[rec.c.time].trim();
   // 미리 만든 빈 행, 또는 자동 결석 행(출석시각 없음): 스캔 시각 기준 상태로 채운다
-  if (status === 'none' || (status === 'absent' && timeEmpty)) {
+  if (fillable_(rec, i)) {
     setText_(rec.t.sh.getRange(i + 2, rec.c.time + 1), time);
     if (scanStatus !== status) setStatus_(rec, i, scanStatus);
     return Object.assign(base, {
@@ -305,6 +311,7 @@ function sessionsBetween_(from, to) {
     att: need_(t, '출석인정시간'),
     late: need_(t, '지각인정시간'),
     round: t.col('차수'),
+    restrict: t.col('클러스터접속제한'),
   };
   const out = [];
   t.display.forEach((r) => {
@@ -325,6 +332,7 @@ function sessionsBetween_(from, to) {
       round: c.round >= 0 ? r[c.round].trim() : '',
       att: att,
       late: Math.max(att, late),
+      restrict: c.restrict >= 0 && flag_(r[c.restrict]),
     });
   });
   return out;
@@ -386,6 +394,12 @@ function findRecord_(rec, id, login) {
 function rowStatus_(rec, row) {
   const k = Object.keys(STATUS).find((s) => rec.c.status[s] >= 0 && isTrue_(row[rec.c.status[s]]));
   return k || 'none';
+}
+
+/** 스캔이 이 행의 상태를 채우는가: 미리 만든 빈 행, 또는 출석시각 없는 자동 결석 행. */
+function fillable_(rec, i) {
+  const status = rowStatus_(rec, rec.t.values[i]);
+  return status === 'none' || (status === 'absent' && !rec.t.display[i][rec.c.time].trim());
 }
 
 // ---------- 시트 쓰기 ----------
@@ -527,6 +541,11 @@ function norm_(s) {
 
 function isTrue_(v) {
   return v === true || String(v).trim().toUpperCase() === 'TRUE';
+}
+
+/** 시트의 켜짐 표시: 체크박스(TRUE) 또는 Y/YES/O/1/예. 비어 있거나 그 외는 꺼짐. */
+function flag_(v) {
+  return /^(true|y|yes|o|1|예)$/i.test(String(v).trim());
 }
 
 function minutesOf_(d) {

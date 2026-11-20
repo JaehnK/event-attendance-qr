@@ -60,15 +60,17 @@ const kst = (ms = Date.now()) => { const p = fmtParts(new Date(ms)); return { da
 const hm = (m) => { m = ((m % 1440) + 1440) % 1440; return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`; };
 const HEAD = ['user_id', 'user_login', '이름', '기수', '행사ID', '행사명', '회차ID', '회차일자', '차수', '출석', '지각', '공가', '결석(사전 고지,취소)', '결석(무단, 노쇼)', '중도포기', '출석시각', '사유'];
 
-function setup({ att, late, note = false, extraSessions = [] }) {
+// restrict: undefined → 행사일정에 클러스터접속제한 열 없음. 값을 주면 열을 만들고 테스트 회차에 그 값을 넣는다.
+function setup({ att, late, note = false, extraSessions = [], restrict }) {
   const { date } = kst();
   const head = note ? [...HEAD, '비고'] : HEAD;
+  const rcol = restrict === undefined ? [] : [restrict];
   const blank = head.map((h) => (['출석', '지각', '공가', '결석(사전 고지,취소)', '결석(무단, 노쇼)', '중도포기'].includes(h) ? false : ''));
   const sheets = {
     학습자명단: makeSheet([['user_id', 'user_login', '이름', '기수'], [172416, 'jaehukim', '김재훈', '1'], [172351, 'SoosLee', '이수성', '1'], [172392, 'jinsecho', '최진성', '']]),
     행사일정: makeSheet([
-      ['행사ID', '회차ID', '행사명', '주관', '구분', '회차일자', '출석인정시간', '지각인정시간', '차수'],
-      ['2026-001', '2026-001-01', '테스트 행사', 'AI', '일반', date, att, late, '1'],
+      ['행사ID', '회차ID', '행사명', '주관', '구분', '회차일자', '출석인정시간', '지각인정시간', '차수', ...(rcol.length ? ['클러스터접속제한'] : [])],
+      ['2026-001', '2026-001-01', '테스트 행사', 'AI', '일반', date, att, late, '1', ...rcol],
       ['2026-001', '2026-001-00', '어제 행사', 'AI', '일반', '2020-01-01', '9:00', '9:10', ''],
       ...extraSessions,
     ]),
@@ -289,6 +291,71 @@ check('absent marking writes contiguous rows in one batch, skips checked rows', 
   assert.deepStrictEqual(e.status(e.row('sooslee')), ['공가']);
   assert.deepStrictEqual(e.status(e.row('jinsecho')), ['결석(무단, 노쇼)']);
   assert.strictEqual(writes, 12); // 구간 2개 × 상태 열 6개 (행마다 쓰던 때는 행 수 × 6)
+});
+
+// ---------- 클러스터 접속 제한 ----------
+
+const T = { att: hm(min + 60), late: hm(min + 70) };
+
+check('restricted session blocks cluster-connected scan, writes nothing', () => {
+  const e = setup({ ...T, restrict: 'Y' });
+  const r = e.call({ action: 'checkin', login: 'jaehukim', id: ID, cluster: true });
+  assert.strictEqual(r.ok, true); assert.strictEqual(r.result, 'blocked_cluster'); assert.strictEqual(r.name, '테스트 행사 1차');
+  assert.strictEqual(e.rows().length, 0); // 행이 없던 학습자도 새로 만들지 않는다
+  // 클러스터에서 로그아웃하고 다시 스캔하면 정상 기록
+  const again = e.call({ action: 'checkin', login: 'jaehukim', id: ID, cluster: false });
+  assert.strictEqual(again.result, 'recorded'); assert.deepStrictEqual(e.status(e.row('jaehukim')), ['출석']);
+});
+
+check('restricted + prefilled empty row stays empty when blocked', () => {
+  const e = setup({ ...T, restrict: 'TRUE' });
+  e.ctx.markAbsent();
+  assert.strictEqual(e.call({ action: 'checkin', login: 'sooslee', id: ID, cluster: true }).result, 'blocked_cluster');
+  assert.deepStrictEqual(e.status(e.row('sooslee')), []); assert.strictEqual(e.row('sooslee')[e.col('출석시각')], '');
+});
+
+check('auto-absent row without time is still blocked (would be filled by the scan)', () => {
+  const e = setup({ att: hm(min - 50), late: hm(min - 40), restrict: 'Y' });
+  e.ctx.markAbsent(); // 마감 지남 → 빈 행 전원 결석(무단)
+  assert.deepStrictEqual(e.status(e.row('jaehukim')), ['결석(무단, 노쇼)']);
+  assert.strictEqual(e.call({ action: 'checkin', login: 'jaehukim', id: ID, cluster: true }).result, 'blocked_cluster');
+  assert.strictEqual(e.row('jaehukim')[e.col('출석시각')], '');
+});
+
+check('not blocked: unrestricted session, missing column, no cluster flag, cluster=false', () => {
+  const none = setup({ ...T }); // 열 자체가 없음 → 기존 동작
+  assert.strictEqual(none.call({ action: 'checkin', login: 'jaehukim', id: ID, cluster: true }).result, 'recorded');
+  const off = setup({ ...T, restrict: 'N' });
+  assert.strictEqual(off.call({ action: 'checkin', login: 'jaehukim', id: ID, cluster: true }).result, 'recorded');
+  const blank = setup({ ...T, restrict: '' });
+  assert.strictEqual(blank.call({ action: 'checkin', login: 'jaehukim', id: ID, cluster: true }).result, 'recorded');
+  const legacy = setup({ ...T, restrict: 'Y' }); // 구버전 Vercel: cluster 필드 없음
+  assert.strictEqual(legacy.call({ action: 'checkin', login: 'jaehukim', id: ID }).result, 'recorded');
+  assert.strictEqual(legacy.call({ action: 'checkin', login: 'sooslee', id: ID, cluster: 'true' }).result, 'recorded'); // 불리언 true 만 인정
+  assert.strictEqual(setup({ ...T, restrict: 'Y' }).call({ action: 'checkin', login: 'jaehukim', id: ID, cluster: false }).result, 'recorded');
+});
+
+check('already-processed rows are not blocked (dup keeps working, pre-marked 공가 kept)', () => {
+  const e = setup({ ...T, restrict: 'Y' });
+  e.ctx.markAbsent();
+  assert.strictEqual(e.call({ action: 'checkin', login: 'jaehukim', id: ID, cluster: false }).result, 'recorded');
+  const dup = e.call({ action: 'checkin', login: 'jaehukim', id: ID, cluster: true });
+  assert.strictEqual(dup.result, 'dup'); assert.strictEqual(dup.label, '출석');
+  e.row('jinsecho')[e.col('공가')] = true;
+  const ex = e.call({ action: 'checkin', login: 'jinsecho', id: ID, cluster: true });
+  assert.strictEqual(ex.result, 'dup'); assert.strictEqual(ex.label, '공가');
+});
+
+check('not_today / not_member are reported before the cluster block', () => {
+  const e = setup({ ...T, restrict: 'Y' });
+  assert.strictEqual(e.call({ action: 'checkin', login: 'stranger', id: ID, cluster: true }).result, 'not_member');
+  assert.strictEqual(e.call({ action: 'checkin', login: 'jaehukim', id: '2026-001-00', cluster: true }).result, 'not_today');
+});
+
+check('flag_ parsing', () => {
+  const { ctx } = setup({ ...T });
+  ['Y', 'y', ' yes ', 'TRUE', 'true', 'O', '1', '예'].forEach((v) => assert.strictEqual(ctx.flag_(v), true, v));
+  ['', 'N', 'no', 'FALSE', '0', '아니오', undefined].forEach((v) => assert.strictEqual(ctx.flag_(v), false, String(v)));
 });
 
 check('parsers + missing column → generic error', () => {

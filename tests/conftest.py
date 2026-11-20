@@ -44,6 +44,8 @@ class FakeGas:
     rows: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict)
     notes: dict[tuple[str, str], list[str]] = field(default_factory=dict)
     calls: list[dict[str, Any]] = field(default_factory=list)
+    # 클러스터 접속 제한(행사일정의 클러스터접속제한 열)이 켜진 회차ID
+    restricted: set[str] = field(default_factory=set)
 
     def today(self) -> list[dict[str, str]]:
         return [{**e, "att": "09:00", "late": "09:10"} for e in self.sessions if e["date"] == TODAY]
@@ -71,6 +73,9 @@ class FakeGas:
         now = dt.datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
         base = {"ok": True, "name": sessions[sid]["name"]}
         row = self.rows.get(key)
+        fillable = row is None or (row["status"] == "absent" and not row["time"])
+        if payload.get("cluster") is True and sid in self.restricted and fillable:
+            return {**base, "result": "blocked_cluster"}
         # 비고: 같은 기기로 출석한 계정을 양쪽 행에
         for other in payload.get("shared", []):
             self.notes.setdefault(key, []).append(other)
@@ -104,13 +109,16 @@ class FakeIntra:
             "code-bob": ("bob", "Bob <script>alert(1)</script>"),
         }
     )
+    # login → 접속 중인 클러스터 자리 (없으면 접속 중 아님)
+    hosts: dict[str, str] = field(default_factory=dict)
     calls: list[str] = field(default_factory=list)
 
-    def __call__(self, code: str) -> tuple[str, str]:
+    def __call__(self, code: str) -> _common.IntraUser:
         self.calls.append(code)
         if code not in self.users:
             raise _common.UpstreamError
-        return self.users[code]
+        login, name = self.users[code]
+        return _common.IntraUser(login, name, self.hosts.get(login, ""))
 
 
 @dataclass

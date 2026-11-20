@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Sequence
 from http.server import BaseHTTPRequestHandler
-from typing import Any
+from typing import Any, NamedTuple
 
 FT_API = "https://api.intra.42.fr"
 GOOGLE_AUTH = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -309,8 +309,14 @@ def google_email(code: str) -> str:
     return email.lower()
 
 
-def intra_user(code: str) -> tuple[str, str]:
-    """인가 코드 → (login, 표시 이름)."""
+class IntraUser(NamedTuple):
+    login: str
+    name: str
+    host: str = ""  # 지금 접속 중인 클러스터 자리(예: c1r2s3). 접속 중이 아니면 빈 문자열
+
+
+def intra_user(code: str) -> IntraUser:
+    """인가 코드 → (login, 표시 이름, 접속 중인 클러스터 자리)."""
     form = urllib.parse.urlencode(
         {
             "grant_type": "authorization_code",
@@ -333,7 +339,14 @@ def intra_user(code: str) -> tuple[str, str]:
     if not isinstance(login, str) or not LOGIN_RE.fullmatch(login.lower()):
         raise UpstreamError
     name = me.get("displayname")
-    return login.lower(), name if isinstance(name, str) and name else login
+    # /v2/me 의 location: 클러스터 자리에 로그인 중이면 호스트명, 아니면 null.
+    # 값이 없거나 예상 밖이면 접속 중이 아닌 것으로 본다 (제한하지 않는 쪽)
+    host = me.get("location")
+    return IntraUser(
+        login.lower(),
+        name if isinstance(name, str) and name else login,
+        host.strip()[:40] if isinstance(host, str) else "",
+    )
 
 
 def gas(payload: dict[str, Any]) -> dict[str, Any]:

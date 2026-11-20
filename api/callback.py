@@ -42,7 +42,7 @@ class handler(c.Handler):  # Vercel 규약: 클래스명 handler
             return
         event_id, scanned_at = target
         try:
-            login, name = c.intra_user(code)
+            login, name, host = c.intra_user(code)
         except Exception:
             self.message(
                 502,
@@ -55,6 +55,8 @@ class handler(c.Handler):  # Vercel 규약: 클래스명 handler
         seen = c.device_seen(dv)
         shared = sorted({who for sid, who in seen if sid == event_id and who != login})
         payload = {"action": "checkin", "login": login, "id": event_id, "at": scanned_at}
+        # 접속 중 여부만 넘긴다. 제한 대상 회차인지는 시트(행사일정)가 판단
+        payload["cluster"] = bool(host)
         if shared:
             payload["shared"] = shared
         try:
@@ -72,6 +74,19 @@ class handler(c.Handler):  # Vercel 규약: 클래스명 handler
         if result == "not_member":
             msg = f"{login} 계정은 학습자 명단에 없습니다. 운영진에게 문의해 주세요."
             self.message(403, "명단에 없는 계정", msg, CLEAR)
+            return
+        if result == "blocked_cluster":
+            # 기록하지 않았으므로 기기 쿠키(dv)도 남기지 않는다. 로그아웃 후 다시 스캔하면 된다
+            self.message(
+                403,
+                "클러스터에서 로그아웃해 주세요",
+                "클러스터에 접속 중이라 출석을 기록하지 않았어요. "
+                "로그아웃한 뒤 QR을 다시 스캔해 주세요. "
+                "이미 자리를 떠났는데도 이 안내가 보이면 운영진에게 알려 주세요.",
+                CLEAR,
+                c.rows_html([("접속 중인 자리", c.esc(host))]),
+                mood="warn",
+            )
             return
         if result not in ("recorded", "dup"):
             self.message(502, "출석 기록 실패", "잠시 후 QR을 다시 스캔해 주세요.", CLEAR)
