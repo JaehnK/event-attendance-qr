@@ -30,6 +30,5 @@ class handler(c.Handler):  # Vercel 규약: 클래스명 handler
                 c.set_cookie("st", state, c.FLOW_TTL),
                 # 회차·스캔 시각을 서명해 둔다. 로그인 중 QR 시간 창이 지나도 유효
                 c.set_cookie("ev", c.scan_cookie(event_id), c.FLOW_TTL),
-                c.clear_cookie("am"),  # 학생 흐름에서는 관리자 모드 해제
             ],
         )

@@ -21,9 +21,13 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any
 
 FT_API = "https://api.intra.42.fr"
+GOOGLE_AUTH = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN = "https://oauth2.googleapis.com/token"  # noqa: S105 (URL)
+GOOGLE_USERINFO = "https://openidconnect.googleapis.com/v1/userinfo"
+EMAIL_RE = re.compile(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}")
 EVENT_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,40}")
 LOGIN_RE = re.compile(r"[a-z0-9-]{2,20}")
-FLOW_TTL = 600  # OAuth 진행용 쿠키(st, ev, am)
+FLOW_TTL = 600  # OAuth 진행용 쿠키(st, ev, ast)
 ADMIN_TTL = 3600  # 관리자 세션 쿠키(adm)
 DEVICE_TTL = 3600  # 기기 쿠키(dv): 이 브라우저에서 출석한 (회차, 계정) 목록
 DEVICE_MAX = 20
@@ -55,9 +59,9 @@ def env(name: str) -> str:
     return value
 
 
-def admin_logins() -> frozenset[str]:
-    """ADMIN_LOGINS 미설정 시 빈 집합 → 모든 관리자 접근 거부."""
-    raw = os.environ.get("ADMIN_LOGINS", "")
+def admin_emails() -> frozenset[str]:
+    """ADMIN_EMAILS 미설정 시 빈 집합 → 모든 관리자 접근 거부."""
+    raw = os.environ.get("ADMIN_EMAILS", "")
     return frozenset(x.strip().lower() for x in raw.split(",") if x.strip())
 
 
@@ -164,29 +168,19 @@ def device_cookie(seen: list[tuple[str, str]]) -> str:
     return seal("dv", {"seen": [list(x) for x in recent], "exp": int(time.time()) + DEVICE_TTL})
 
 
-def admin_session_cookie(login: str) -> str:
-    return seal("adm", {"login": login, "exp": int(time.time()) + ADMIN_TTL, "role": "admin"})
+def admin_session_cookie(email: str) -> str:
+    return seal("adm", {"email": email, "exp": int(time.time()) + ADMIN_TTL, "role": "admin"})
 
 
 def admin_session(token: str) -> str | None:
-    """유효한 관리자 세션이면 login. 현재 ADMIN_LOGINS 에서 빠진 계정도 거부."""
+    """유효한 관리자 세션이면 이메일. 현재 ADMIN_EMAILS 에서 빠진 계정도 거부."""
     data = unseal("adm", token)
     if not data or data.get("role") != "admin":
         return None
-    login = data.get("login")
-    if not isinstance(login, str) or login not in admin_logins():
+    email = data.get("email")
+    if not isinstance(email, str) or email not in admin_emails():
         return None
-    return login
-
-
-def admin_mode_cookie(state: str) -> str:
-    """관리자 로그인 모드 표시. 이번 OAuth state 에 묶어 다른 흐름에 재사용되지 않게 한다."""
-    return seal("mode", {"mode": "admin", "st": state, "exp": int(time.time()) + FLOW_TTL})
-
-
-def is_admin_mode(token: str, state: str) -> bool:
-    data = unseal("mode", token)
-    return bool(data) and data.get("mode") == "admin" and same(data.get("st"), state)
+    return email
 
 
 def reason_token(login: str, event_id: str) -> str:
@@ -269,6 +263,50 @@ def authorize_url(state: str) -> str:
         }
     )
     return f"{FT_API}/oauth/authorize?{query}"
+
+
+def google_redirect_uri() -> str:
+    return f"{env('BASE_URL').rstrip('/')}/admin/callback"
+
+
+def google_authorize_url(state: str) -> str:
+    query = urllib.parse.urlencode(
+        {
+            "client_id": env("GOOGLE_CLIENT_ID"),
+            "redirect_uri": google_redirect_uri(),
+            "response_type": "code",
+            "scope": "openid email",
+            "state": state,
+            "prompt": "select_account",
+        }
+    )
+    return f"{GOOGLE_AUTH}?{query}"
+
+
+def google_email(code: str) -> str:
+    """인가 코드 → 확인된(email_verified) 이메일 소문자."""
+    form = urllib.parse.urlencode(
+        {
+            "grant_type": "authorization_code",
+            "client_id": env("GOOGLE_CLIENT_ID"),
+            "client_secret": env("GOOGLE_CLIENT_SECRET"),
+            "code": code,
+            "redirect_uri": google_redirect_uri(),
+        }
+    ).encode()
+    tok = _request(
+        GOOGLE_TOKEN, data=form, headers={"Content-Type": "application/x-www-form-urlencoded"}
+    )
+    access = tok.get("access_token") if isinstance(tok, dict) else None
+    if not isinstance(access, str) or not access:
+        raise UpstreamError
+    me = _request(GOOGLE_USERINFO, headers={"Authorization": f"Bearer {access}"})
+    if not isinstance(me, dict) or me.get("email_verified") is not True:
+        raise UpstreamError
+    email = me.get("email")
+    if not isinstance(email, str) or not EMAIL_RE.fullmatch(email.lower()):
+        raise UpstreamError
+    return email.lower()
 
 
 def intra_user(code: str) -> tuple[str, str]:

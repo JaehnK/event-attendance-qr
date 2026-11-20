@@ -1,23 +1,25 @@
 # 42 인트라 로그인 기반 회차별 QR 출석
 
 현장 QR 스캔 → 42 인트라 로그인 → 학습자 명단과 대조 → 구글 시트 `행사참여현황`에 출석·지각·결석을 기록합니다.
-관리자 QR 페이지(`/qr`)는 `ADMIN_LOGINS`에 등록된 인트라 계정으로 로그인해야만 열립니다.
+관리자 QR 페이지(`/qr`)는 `ADMIN_EMAILS`에 등록된 Google 계정으로 로그인해야만 열립니다. (42 스태프 계정은 미인증 OAuth 앱에 로그인할 수 없어 관리자 인증을 Google로 분리했습니다)
 
 ```
-[관리자] /qr ──(42 로그인, ADMIN_LOGINS 확인)──▶ 오늘 회차 QR 표시
+[관리자] /qr ──(Google 로그인 → /admin/callback, ADMIN_EMAILS 확인)──▶ 오늘 회차 QR 표시
 [학생]   QR 스캔 → /?e=<회차ID>&t=<시간창>&s=<서명> → 42 로그인 → /callback → Apps Script → 시트 기록
                                                           └─ 결석이면 사유 폼 → /reason
-[트리거] 5분마다 markAbsent → 지각인정시간 + 30분 지난 회차의 미출석자 결석(무단) 처리
+[트리거] 5분마다 markAbsent → ① 오늘 회차의 학습자별 빈 행 생성 ② 지각인정시간 + 30분 지난 회차의 빈 행 결석(무단) 처리
+[메뉴]   시트 "출석 → 앞으로 7일 회차 명단 생성" → 공가·사전 결석을 미리 체크할 수 있게 행을 먼저 생성
 ```
 
 | 파일 | 역할 |
 |---|---|
 | `api/start.py` | QR 진입점. 이벤트 서명 검증 후 42 OAuth로 이동 |
-| `api/callback.py` | OAuth 콜백. 관리자 모드면 세션 발급만, 학생 모드면 출석 기록 |
+| `api/callback.py` | 42 OAuth 콜백. 학생 출석 기록 |
+| `api/admin_callback.py` | Google OAuth 콜백. 관리자 세션 발급만 (출석 기록 없음) |
 | `api/qr.py` | 관리자 전용 오늘 회차 QR 페이지 |
 | `api/reason.py` | 결석 사유 제출 (콜백 화면의 서명된 폼으로만 받음) |
 | `api/_common.py` | 서명·쿠키·외부 호출 공통 코드 (`_` 접두사라 Vercel 함수로 노출되지 않음) |
-| `apps-script.gs` | 출석 관리 시트에 붙이는 Apps Script 웹앱 + 자동 결석 트리거 |
+| `apps-script.gs` | 출석 관리 시트에 붙이는 Apps Script 웹앱 + 명단 생성·자동 결석 트리거 + 시트 메뉴 |
 
 ## 설정 순서
 
@@ -42,10 +44,12 @@
 | ~ 출석인정시간 | `출석` ☑ |
 | ~ 지각인정시간 | `지각` ☑ |
 | 그 이후 | `결석(무단, 노쇼)` ☑ + 출석시각, 화면에서 사유 입력 → `사유` |
-| 지각인정시간 + 30분 (트리거) | 기록 없는 학습자 전원 `결석(무단, 노쇼)` ☑ (출석시각 빈칸) |
+| 지각인정시간 + 30분 (트리거) | 상태가 빈 행 전원 `결석(무단, 노쇼)` ☑ (출석시각 빈칸) |
 
 판정과 `출석시각`은 42 로그인을 마친 시각이 아니라 **QR을 스캔한 시각**(서버가 서명한 `ev` 쿠키, 10분 유효) 기준입니다. 로그인이 오래 걸려도 불이익이 없습니다.
-같은 (회차ID, user_login)은 한 번만 기록합니다. 자동 결석 뒤 도착하면 그 행에 출석시각만 채우고 사유를 받습니다.
+`행사참여현황`의 행은 **미리 만들어집니다.** 트리거가 자정 이후 첫 실행(~00:05)에 오늘 회차 × 학습자 행을 상태가 빈 채로 만들고, 시트 메뉴 **출석 → 앞으로 7일 회차 명단 생성**으로 미리 만들 수도 있습니다(이미 있는 행은 건너뜀). 사전에 연락받은 공가·사전 결석은 행사 전에 체크해 두면 자동 결석 대상에서 빠집니다.
+
+스캔은 내 행을 찾아 상태와 출석시각만 채웁니다. 관리자가 미리 체크한 상태는 덮어쓰지 않고 출석시각만 남깁니다. 행을 만든 뒤 명단에 추가된 학습자는 스캔 때 한 줄 추가됩니다. 자동 결석 뒤 도착하면 그 행에 출석시각만 채우고 사유를 받습니다.
 관리자가 나중에 `공가`·`결석(사전…)`·`중도포기`로 고친 값은 스크립트가 덮어쓰지 않습니다.
 
 같은 브라우저로 한 회차에 여러 계정이 출석하면 출석은 정상 처리하고, `비고` 열이 있으면 양쪽 행에 `기기 중복: <상대 계정>`을 남깁니다(학생 화면에는 표시하지 않음). 대리 출석 확인용 신호일 뿐 확정 판단은 아닙니다.
@@ -54,16 +58,36 @@
 1. 출석 관리 시트에서 **확장 프로그램 → Apps Script**를 열고 `apps-script.gs` 내용을 붙여넣습니다. (시트에 바인딩된 스크립트여야 합니다)
 2. 프로젝트 설정 → 스크립트 속성에 이름 **`TOKEN`**, 값은 Vercel `GAS_TOKEN`과 같은 긴 랜덤 문자열을 넣습니다.
    예: `python -c "import secrets;print(secrets.token_urlsafe(32))"`
-3. 편집기에서 함수 `setupTrigger`를 선택해 **한 번 실행**하고 권한을 승인합니다. (5분 주기 `markAbsent` 트리거 등록)
+3. 편집기에서 함수 `setupTrigger`를 선택해 **한 번 실행**하고 권한을 승인합니다. (5분 주기 `markAbsent` 트리거 등록 + 오늘 행 즉시 생성) 시트를 새로고침하면 상단에 **출석** 메뉴가 생깁니다.
 4. 배포 → 새 배포 → 유형은 **웹 앱**, 실행 계정은 **나**, 액세스 권한은 **모든 사용자**로 설정합니다.
    - Google Workspace 계정은 조직 정책 때문에 외부 접근이 403으로 막힐 수 있습니다. 시크릿 창에서 `/exec`를 열어 "액세스 거부됨"이 뜨면 정책 문제입니다.
 5. 발급된 `/exec` URL을 복사합니다. 코드를 고친 뒤에는 "배포 관리 → 수정 → 새 버전"으로 갱신해야 URL이 유지됩니다.
+
+**코드 갱신 자동화 (clasp)**: 처음 배포한 뒤로는 저장소의 `apps-script.gs`만 고치고 아래 명령으로 올립니다. 하네스 테스트 → `clasp push` → 기존 배포(`.clasp.json`의 `deploymentId`)를 새 버전으로 갱신하므로 URL이 유지됩니다. 편집기에서 직접 고친 내용은 덮어써집니다.
+```sh
+npm i -g @google/clasp                 # 최초 1회
+"$(npm prefix -g)/bin/clasp" login --no-localhost   # 최초 1회 (/usr/bin/clasp 와 이름이 겹치면 전체 경로로)
+./scripts/deploy-gas.sh "변경 설명"
+```
+사전에 <https://script.google.com/home/usersettings>에서 Google Apps Script API를 켜야 합니다.
+
+**clasp 로그인이 막힐 때**: Workspace 계정은 조직의 Google Cloud 세션 정책 때문에 `invalid_grant … invalid_rapt`가 나거나 동의 화면에서 무한 로딩이 걸릴 수 있습니다(재로그인해도 반복되면 관리자가 정책을 바꿔야 합니다). 이때는 clasp 없이 편집기로 올립니다.
+1. `./scripts/deploy-gas.sh`의 테스트 부분만 먼저 돌려 확인합니다: `node tests/apps_script_harness.js apps-script.gs`
+2. 시트 → 확장 프로그램 → Apps Script에서 코드 파일 전체를 `apps-script.gs` 내용으로 덮어쓰고 저장합니다.
+3. 배포 → 배포 관리 → 기존 웹앱 배포의 연필 아이콘 → 버전 **새 버전** → 배포. **새 배포를 만들면 `/exec` URL이 바뀌어** Vercel의 `GAS_URL`을 고쳐야 하므로 반드시 기존 배포를 수정합니다.
 
 ### 3. 42 앱 등록
 <https://profile.intra.42.fr/oauth/applications>에서 새 앱을 만듭니다.
 - Redirect URI: `https://<프로젝트>.vercel.app/callback`
 - Scope: `public`
 - 발급된 UID와 SECRET을 메모합니다.
+
+### 3-1. Google OAuth 클라이언트 (관리자 로그인)
+<https://console.cloud.google.com>에서 관리자 계정으로 프로젝트를 만듭니다.
+- API 및 서비스 → OAuth 동의 화면: 사용자 유형 **내부**(Workspace 계정만 로그인, 심사 불필요)
+- 사용자 인증 정보 → OAuth 클라이언트 ID → **웹 애플리케이션**
+- 승인된 리디렉션 URI: `https://<프로젝트>.vercel.app/admin/callback` (`BASE_URL` + `/admin/callback`)
+- 발급된 클라이언트 ID와 보안 비밀번호를 메모합니다.
 
 ### 4. Vercel 환경변수
 | 이름 | 값 |
@@ -74,7 +98,8 @@
 | `GAS_TOKEN` | Apps Script 속성 `TOKEN`과 같은 값 |
 | `SESSION_SECRET` | 서명용 긴 랜덤 문자열. 바꾸면 기존 QR과 세션이 모두 무효가 됩니다 |
 | `BASE_URL` | QR에 들어갈 주소. 예: `https://<프로젝트>.vercel.app` |
-| `ADMIN_LOGINS` | 관리자 인트라 ID. 쉼표로 구분하고 대소문자는 무시합니다. **비어 있으면 아무도 `/qr`에 접근할 수 없습니다** |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | 관리자 로그인용 Google OAuth 클라이언트 |
+| `ADMIN_EMAILS` | 관리자 Google 이메일. 쉼표로 구분하고 대소문자는 무시합니다. **비어 있으면 아무도 `/qr`에 접근할 수 없습니다** |
 
 환경변수를 바꾼 뒤에는 재배포해야 반영됩니다.
 
@@ -84,7 +109,7 @@
 
 ### 5. 운영 방법
 1. `학습자명단`에 교육생을, `행사일정`에 회차를 미리 추가합니다. 예: `2026-001 | 2026-001-01 | 테스트 행사 | … | 2026-10-07 | 9:00 | 9:10 | 1`
-2. 관리자가 `https://<프로젝트>.vercel.app/qr`을 열어 42 로그인을 마치면 오늘 회차의 QR과 출석·지각 마감 시각이 표시됩니다. 화면은 20초마다 자동 새로고침되며 QR도 새로 발급됩니다. 세션은 1시간이며, 만료되면 42 로그인을 거쳐 자동으로 돌아옵니다(42에 로그인된 상태라면 클릭 없이).
+2. 관리자가 `https://<프로젝트>.vercel.app/qr`을 열어 Google 로그인을 마치면 오늘 회차의 QR과 출석·지각 마감 시각이 표시됩니다. 화면은 20초마다 자동 새로고침되며 QR도 새로 발급됩니다. 세션은 1시간이며, 만료되면 Google 계정 선택 화면을 거쳐 돌아옵니다.
 3. 교육생이 QR을 스캔하면 `행사참여현황`에 한 줄씩 기록됩니다. 명단에 없는 계정은 기록하지 않고 안내만 합니다.
 4. 지각인정시간 + 30분이 지나면 미출석자가 자동으로 결석(무단) 처리됩니다.
 5. 행사가 끝난 뒤 관리자가 공가·사전 결석·중도포기를 체크박스로 고칩니다.
@@ -99,7 +124,8 @@ uv sync                     # 개발 환경 (pytest, ruff, ty)
 uv run ruff format .        # 포맷
 uv run ruff check .         # lint (bandit 보안 규칙 포함)
 uv run ty check             # 타입 검사
-uv run pytest -q            # 42 API·Apps Script를 모킹한 로컬 흐름 테스트
+uv run pytest -q            # 42 API·Google·Apps Script를 모킹한 로컬 흐름 테스트
+node tests/apps_script_harness.js apps-script.gs   # 가짜 시트 위에서 apps-script.gs 실행 검증
 ```
 
 ## 보안 메모
@@ -107,10 +133,10 @@ uv run pytest -q            # 42 API·Apps Script를 모킹한 로컬 흐름 테
 - 모든 쿠키는 `HttpOnly; Secure; SameSite=Lax; Path=/`입니다.
   - `st`: OAuth state
   - `ev`: 학생 회차
-  - `am`: 관리자 로그인 모드. 해당 state에 묶여 있습니다.
+  - `ast`: 관리자 Google 로그인 state. 학생용 `st`와 분리되어 있습니다.
   - `dv`: 이 브라우저에서 출석한 (회차, 계정) 목록. 1시간 유효하며 기기 중복 표시에만 씁니다. 시트에는 기기 식별값을 저장하지 않습니다.
-  - `adm`: 관리자 세션. 1시간 유효하며 요청마다 `ADMIN_LOGINS`를 다시 확인합니다.
-- 관리자 로그인 경로는 Apps Script `checkin`을 호출하지 않습니다.
+  - `adm`: 관리자 세션(`email`, `role=admin`, `exp`). 1시간 유효하며 요청마다 `ADMIN_EMAILS`를 다시 확인합니다.
+- 관리자 로그인 경로(`/admin/callback`)는 42 API와 Apps Script `checkin`을 호출하지 않습니다. Google `email_verified`가 참인 이메일만 받습니다.
 - 결석 사유 폼은 쿠키 없이 `(login, 회차ID)`에 묶인 서명 토큰(30분)으로만 제출됩니다. 사유는 공백 정리 후 200자 제한, 시트에는 일반 텍스트 서식으로 써서 수식으로 해석되지 않습니다.
 - 응답에는 예외 메시지와 환경변수 이름이 들어가지 않습니다. 모든 페이지에 `Cache-Control: no-store`와 엄격한 CSP를 적용합니다.
 

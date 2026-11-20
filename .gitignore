@@ -23,3 +23,4 @@ htmlcov/
 .idea/
 .claude/
 .DS_Store
+gas/
