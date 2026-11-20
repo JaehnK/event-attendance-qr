@@ -361,22 +361,18 @@ def test_device_cookie_not_set_when_not_recorded(client: Client, gas: FakeGas) -
     assert r.cookie("dv") is None
 
 
-# ---------- 클러스터 접속 제한 ----------
+# ---------- 클러스터 접속 차단 ----------
 
 
-def test_cluster_login_blocked_on_restricted_session(
-    client: Client, gas: FakeGas, intra: FakeIntra
-) -> None:
-    gas.restricted.add("day1-am")
+def test_cluster_login_blocked_before_sheet(client: Client, gas: FakeGas, intra: FakeIntra) -> None:
     intra.hosts["alice"] = "c1r2s3"
     _, r = student_login(client, "day1-am", "code-alice")
     assert r.status == 403
-    assert "클러스터에서 로그아웃해 주세요" in r.body
+    assert "클러스터에 로그인 중입니다" in r.body
     assert "c1r2s3" in r.body
-    assert "출석 완료" not in r.body
-    assert gas.calls[-1]["cluster"] is True
-    assert not gas.rows  # 기록하지 않았다
-    assert r.cookie("dv") is None  # 기기 쿠키도 남기지 않는다
+    assert not gas.calls  # 시트(Apps Script)까지 가지 않는다
+    assert not gas.rows
+    assert r.cookie("dv") is None
     for name in ("st", "ev"):
         assert "Max-Age=0" in (r.cookie(name) or "")
 
@@ -384,38 +380,18 @@ def test_cluster_login_blocked_on_restricted_session(
 def test_cluster_block_then_logout_and_rescan_records(
     client: Client, gas: FakeGas, intra: FakeIntra
 ) -> None:
-    gas.restricted.add("day1-am")
     intra.hosts["alice"] = "c1r2s3"
     _, blocked = student_login(client, "day1-am", "code-alice")
     assert blocked.status == 403
-    assert not gas.rows
     del intra.hosts["alice"]  # 클러스터에서 로그아웃
     _, r = student_login(client, "day1-am", "code-alice")
     assert r.status == 200
     assert "출석 완료" in r.body
-    assert gas.calls[-1]["cluster"] is False
+    assert "cluster" not in gas.calls[-1]
     assert gas.rows["day1-am", "alice"]["status"] == "present"
-
-
-def test_cluster_login_allowed_on_unrestricted_session(
-    client: Client, gas: FakeGas, intra: FakeIntra
-) -> None:
-    intra.hosts["alice"] = "c1r2s3"  # 제한 회차가 아니면 접속 중이어도 출석된다
-    _, r = student_login(client, "day1-am", "code-alice")
-    assert r.status == 200
-    assert gas.calls[-1]["cluster"] is True  # 판단은 시트 쪽
-    assert gas.rows["day1-am", "alice"]["status"] == "present"
-
-
-def test_not_at_cluster_sends_false(client: Client, gas: FakeGas) -> None:
-    gas.restricted.add("day1-am")
-    _, r = student_login(client, "day1-am", "code-alice")
-    assert r.status == 200
-    assert gas.calls[-1]["cluster"] is False
 
 
 def test_cluster_host_is_escaped(client: Client, gas: FakeGas, intra: FakeIntra) -> None:
-    gas.restricted.add("day1-am")
     intra.hosts["alice"] = "<script>alert(1)</script>"
     _, r = student_login(client, "day1-am", "code-alice")
     assert r.status == 403
