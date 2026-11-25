@@ -133,6 +133,13 @@ uv run pytest -q            # 42 API·Google·Apps Script를 모킹한 로컬 �
 node tests/apps_script_harness.js apps-script.gs   # 가짜 시트 위에서 apps-script.gs 실행 검증
 ```
 
+### 버전·브랜치
+
+- `main`은 항상 배포 가능한 상태로 둡니다. 작업은 `feat/*`(기능)이나 `fix/*`(버그) 브랜치에서 하고 PR로 `main`에 합칩니다.
+- 앞 PR이 아직 열려 있으면 그 브랜치를 base로 PR을 쌓습니다. 앞 PR이 바뀌면 rebase 대신 merge로 따라가서 force push를 피합니다.
+- 버전은 SemVer입니다. 기능 추가·동작 변경은 minor(`0.x.0`), 버그 수정은 patch(`0.x.y`)를 올립니다. 각 PR에서 `pyproject.toml`의 `version`, `uv.lock`, `CHANGELOG.md`를 함께 고칩니다.
+- PR이 `main`에 병합되면 병합 커밋에 `git tag -a vX.Y.Z -m "..."` 후 `git push origin vX.Y.Z`로 태그를 올립니다.
+
 ## 보안 메모
 - 화면 QR 서명은 `HMAC-SHA256(SESSION_SECRET, "qr:<회차ID>:<시간창>")[:16]`이고 시간창은 30초 단위입니다. 현재·직전 창만 받으므로 QR 사진은 최대 1분 안에 만료됩니다. 로그인 중에는 고정 서명 `HMAC(회차ID)[:16]`을 담은 `ev` 쿠키로 재검증합니다. 쿠키 서명에는 `"<용도>:"` 접두사를 붙여 서로 섞이지 않게 했습니다.
 - 모든 쿠키는 `HttpOnly; Secure; SameSite=Lax; Path=/`입니다.
