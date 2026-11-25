@@ -1,5 +1,7 @@
 # 42 인트라 로그인 기반 회차별 QR 출석
 
+현재 버전 **0.4.0** · 버전별 변경 내용은 [패치노트(CHANGELOG.md)](CHANGELOG.md)를 참고하세요.
+
 현장 QR 스캔 → 42 인트라 로그인 → 학습자 명단과 대조 → 구글 시트 `행사참여현황`에 출석·지각·결석을 기록합니다.
 관리자 QR 페이지(`/qr`)는 `ADMIN_EMAILS`에 등록된 Google 계정으로 로그인해야만 열립니다. (42 스태프 계정은 미인증 OAuth 앱에 로그인할 수 없어 관리자 인증을 Google로 분리했습니다)
 
@@ -137,7 +139,7 @@ node tests/apps_script_harness.js apps-script.gs   # 가짜 시트 위에서 app
 
 - `main`은 항상 배포 가능한 상태로 둡니다. 작업은 `feat/*`(기능)이나 `fix/*`(버그) 브랜치에서 하고 PR로 `main`에 합칩니다.
 - 앞 PR이 아직 열려 있으면 그 브랜치를 base로 PR을 쌓습니다. 앞 PR이 바뀌면 rebase 대신 merge로 따라가서 force push를 피합니다.
-- 버전은 SemVer입니다. 기능 추가·동작 변경은 minor(`0.x.0`), 버그 수정은 patch(`0.x.y`)를 올립니다. 각 PR에서 `pyproject.toml`의 `version`, `uv.lock`, `CHANGELOG.md`를 함께 고칩니다.
+- 버전은 SemVer입니다. 기능 추가·동작 변경은 minor(`0.x.0`), 버그 수정은 patch(`0.x.y`)를 올립니다. 각 PR에서 `pyproject.toml`의 `version`, `uv.lock`, [`CHANGELOG.md`](CHANGELOG.md), 이 문서 상단의 현재 버전을 함께 고칩니다.
 - PR이 `main`에 병합되면 병합 커밋에 `git tag -a vX.Y.Z -m "..."` 후 `git push origin vX.Y.Z`로 태그를 올립니다.
 
 ## 보안 메모
