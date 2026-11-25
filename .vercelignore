@@ -5,3 +5,7 @@ __pycache__
 tests
 SPEC.md
 .env*
+.clasp.json
+appsscript.json
+gas/
+scripts/

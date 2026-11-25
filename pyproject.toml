@@ -1,6 +1,6 @@
 [project]
 name = "event-attendance"
-version = "0.1.0"
+version = "0.2.0"
 description = "42 인트라 로그인 기반 회차별 QR 출석 (Vercel Python + Google Sheets)"
 requires-python = ">=3.12"
 dependencies = ["segno>=1.6"]
@@ -19,7 +19,7 @@ target-version = "py312"
 select = ["E", "W", "F", "I", "B", "UP", "S", "SIM", "C4", "RUF", "PT", "RET", "PIE"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["_common", "callback", "conftest", "qr", "reason", "start"]
+known-first-party = ["_common", "admin_callback", "callback", "conftest", "qr", "reason", "start"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106"]

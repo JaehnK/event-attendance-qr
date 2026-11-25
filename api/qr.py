@@ -1,4 +1,4 @@
-"""관리자 전용: 오늘 회차의 출석 QR 표시. 42 로그인 + ADMIN_LOGINS 로 인증."""
+"""관리자 전용: 오늘 회차의 출석 QR 표시. Google 로그인 + ADMIN_EMAILS 로 인증."""
 
 import os
 import sys
@@ -34,21 +34,16 @@ def qr_card(ev: dict, window: int) -> str:
 
 class handler(c.Handler):  # Vercel 규약: 클래스명 handler
     def get(self) -> None:
-        if not c.admin_logins():  # 미설정 시 안전한 기본값: 전원 거부
+        if not c.admin_emails():  # 미설정 시 안전한 기본값: 전원 거부
             self.message(403, "접근 권한이 없습니다", "관리자만 접근할 수 있습니다.")
             return
-        login = c.admin_session(self.cookies().get("adm", ""))
-        if login is None:
-            # 세션 없음/위조/만료 → 관리자 모드로 42 로그인
+        email = c.admin_session(self.cookies().get("adm", ""))
+        if email is None:
+            # 세션 없음/위조/만료 → Google 로그인 (학생용 st 와 분리된 ast)
             state = c.new_state()
             self.redirect(
-                c.authorize_url(state),
-                [
-                    c.set_cookie("st", state, c.FLOW_TTL),
-                    c.set_cookie("am", c.admin_mode_cookie(state), c.FLOW_TTL),
-                    c.clear_cookie("ev"),
-                    c.clear_cookie("adm"),
-                ],
+                c.google_authorize_url(state),
+                [c.set_cookie("ast", state, c.FLOW_TTL), c.clear_cookie("adm")],
             )
             return
 
@@ -73,7 +68,7 @@ class handler(c.Handler):  # Vercel 규약: 클래스명 handler
         today = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 9 * 3600))
         top = (
             '<div class="top"><h1>출석 QR</h1>'
-            f'<span class="muted">{today} · 관리자 {c.esc(login)} · '
+            f'<span class="muted">{today} · 관리자 {c.esc(email)} · '
             f"{c.QR_REFRESH}초마다 새 QR로 바뀝니다</span></div>"
             f'<div class="timer" style="--refresh:{c.QR_REFRESH}s"><i></i></div>'
         )

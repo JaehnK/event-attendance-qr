@@ -5,6 +5,7 @@
     { "source": "/", "destination": "/api/start" },
     { "source": "/callback", "destination": "/api/callback" },
     { "source": "/qr", "destination": "/api/qr" },
-    { "source": "/reason", "destination": "/api/reason" }
+    { "source": "/reason", "destination": "/api/reason" },
+    { "source": "/admin/callback", "destination": "/api/admin_callback" }
   ]
 }

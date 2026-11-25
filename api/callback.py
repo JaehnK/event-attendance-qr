@@ -1,4 +1,4 @@
-"""OAuth 콜백: state 검증 후 관리자 로그인 / 학생 출석 모드로 분기."""
+"""42 OAuth 콜백: 학생 출석 처리 (관리자 로그인은 /admin/callback, Google)."""
 
 import os
 import sys
@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import _common as c
 
 # 콜백에서 사용한 흐름 쿠키는 결과와 무관하게 만료
-CLEAR = [c.clear_cookie("st"), c.clear_cookie("ev"), c.clear_cookie("am")]
+CLEAR = [c.clear_cookie("st"), c.clear_cookie("ev")]
 
 
 class handler(c.Handler):  # Vercel 규약: 클래스명 handler
@@ -30,38 +30,7 @@ class handler(c.Handler):  # Vercel 규약: 클래스명 handler
         if not code or "error" in q:
             self.message(400, "로그인이 취소되었습니다", "다시 시도해 주세요.", CLEAR)
             return
-        if c.is_admin_mode(ck.get("am", ""), state):
-            self.admin_login(code)
-        else:
-            self.student_checkin(code, ck.get("ev", ""), ck.get("dv", ""))
-
-    # ----- 관리자: 세션 발급만, 출석 기록 없음 -----
-    def admin_login(self, code: str) -> None:
-        deny = [*CLEAR, c.clear_cookie("adm")]
-        admins = c.admin_logins()
-        if not admins:
-            self.message(
-                403, "접근 권한이 없습니다", "관리자 계정으로 등록되어 있지 않습니다.", deny
-            )
-            return
-        try:
-            login, _ = c.intra_user(code)
-        except Exception:
-            self.message(
-                502,
-                "로그인 실패",
-                "42 로그인 처리 중 오류가 발생했습니다. 다시 시도해 주세요.",
-                deny,
-            )
-            return
-        if login not in admins:
-            self.message(
-                403, "접근 권한이 없습니다", "관리자 계정으로 등록되어 있지 않습니다.", deny
-            )
-            return
-        self.redirect(
-            "/qr", [*CLEAR, c.set_cookie("adm", c.admin_session_cookie(login), c.ADMIN_TTL)]
-        )
+        self.student_checkin(code, ck.get("ev", ""), ck.get("dv", ""))
 
     # ----- 학생: 출석 기록 -----
     def student_checkin(self, code: str, ev: str, dv: str) -> None:
