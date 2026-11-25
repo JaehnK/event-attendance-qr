@@ -427,7 +427,7 @@ def test_admin_login_and_qr(client: Client, gas: FakeGas, intra: FakeIntra) -> N
     assert "Max-Age=0" in (cb.cookie("ast") or "")
     adm = cb.cookie("adm")
     assert adm is not None
-    for attr in ("Max-Age=3600", "HttpOnly", "Secure", "SameSite=Lax", "Path=/"):
+    for attr in ("Max-Age=28800", "HttpOnly", "Secure", "SameSite=Lax", "Path=/"):
         assert attr in adm
     # 관리자 로그인은 42·출석과 무관
     assert intra.calls == []
@@ -457,7 +457,7 @@ def test_admin_session_payload(client: Client) -> None:
     data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
     assert data["email"] == "admin@gsia.kr"
     assert data["role"] == "admin"
-    assert 3500 < data["exp"] - time.time() <= 3600
+    assert 28700 < data["exp"] - time.time() <= 28800
     assert len(sig) == 64
 
 
