@@ -1,5 +1,7 @@
 # 42 인트라 로그인 기반 회차별 QR 출석
 
+현재 버전 **0.4.0** · 버전별 변경 내용은 [패치노트(CHANGELOG.md)](CHANGELOG.md)를 참고하세요.
+
 현장 QR 스캔 → 42 인트라 로그인 → 학습자 명단과 대조 → 구글 시트 `행사참여현황`에 출석·지각·결석을 기록합니다.
 관리자 QR 페이지(`/qr`)는 `ADMIN_EMAILS`에 등록된 Google 계정으로 로그인해야만 열립니다. (42 스태프 계정은 미인증 OAuth 앱에 로그인할 수 없어 관리자 인증을 Google로 분리했습니다)
 
@@ -114,7 +116,7 @@ npm i -g @google/clasp                 # 최초 1회
 
 ### 5. 운영 방법
 1. `학습자명단`에 교육생을, `행사일정`에 회차를 미리 추가합니다. 예: `2026-001 | 2026-001-01 | 테스트 행사 | … | 2026-10-07 | 9:00 | 9:10 | 1`
-2. 관리자가 `https://<프로젝트>.vercel.app/qr`을 열어 Google 로그인을 마치면 오늘 회차의 QR과 출석·지각 마감 시각이 표시됩니다. 화면은 20초마다 자동 새로고침되며 QR도 새로 발급됩니다. 세션은 1시간이며, 만료되면 Google 계정 선택 화면을 거쳐 돌아옵니다.
+2. 관리자가 `https://<프로젝트>.vercel.app/qr`을 열어 Google 로그인을 마치면 오늘 회차의 QR과 출석·지각 마감 시각이 표시됩니다. 화면은 20초마다 자동 새로고침되며 QR도 새로 발급됩니다. 세션은 8시간이며, 만료되면 Google 계정 선택 화면을 거쳐 돌아옵니다.
 3. 교육생이 QR을 스캔하면 `행사참여현황`에 한 줄씩 기록됩니다. 명단에 없는 계정은 기록하지 않고 안내만 합니다.
 4. 지각인정시간 + 30분이 지나면 미출석자가 자동으로 결석(무단) 처리됩니다.
 5. 행사가 끝난 뒤 관리자가 공가·사전 결석·중도포기를 체크박스로 고칩니다.
@@ -133,6 +135,13 @@ uv run pytest -q            # 42 API·Google·Apps Script를 모킹한 로컬 �
 node tests/apps_script_harness.js apps-script.gs   # 가짜 시트 위에서 apps-script.gs 실행 검증
 ```
 
+### 버전·브랜치
+
+- `main`은 항상 배포 가능한 상태로 둡니다. 작업은 `feat/*`(기능)이나 `fix/*`(버그) 브랜치에서 하고 PR로 `main`에 합칩니다.
+- 앞 PR이 아직 열려 있으면 그 브랜치를 base로 PR을 쌓습니다. 앞 PR이 바뀌면 rebase 대신 merge로 따라가서 force push를 피합니다.
+- 버전은 SemVer입니다. 기능 추가·동작 변경은 minor(`0.x.0`), 버그 수정은 patch(`0.x.y`)를 올립니다. 각 PR에서 `pyproject.toml`의 `version`, `uv.lock`, [`CHANGELOG.md`](CHANGELOG.md), 이 문서 상단의 현재 버전을 함께 고칩니다.
+- PR이 `main`에 병합되면 병합 커밋에 `git tag -a vX.Y.Z -m "..."` 후 `git push origin vX.Y.Z`로 태그를 올립니다.
+
 ## 보안 메모
 - 화면 QR 서명은 `HMAC-SHA256(SESSION_SECRET, "qr:<회차ID>:<시간창>")[:16]`이고 시간창은 30초 단위입니다. 현재·직전 창만 받으므로 QR 사진은 최대 1분 안에 만료됩니다. 로그인 중에는 고정 서명 `HMAC(회차ID)[:16]`을 담은 `ev` 쿠키로 재검증합니다. 쿠키 서명에는 `"<용도>:"` 접두사를 붙여 서로 섞이지 않게 했습니다.
 - 모든 쿠키는 `HttpOnly; Secure; SameSite=Lax; Path=/`입니다.
@@ -140,7 +149,7 @@ node tests/apps_script_harness.js apps-script.gs   # 가짜 시트 위에서 app
   - `ev`: 학생 회차
   - `ast`: 관리자 Google 로그인 state. 학생용 `st`와 분리되어 있습니다.
   - `dv`: 이 브라우저에서 출석한 (회차, 계정) 목록. 1시간 유효하며 기기 중복 표시에만 씁니다. 시트에는 기기 식별값을 저장하지 않습니다.
-  - `adm`: 관리자 세션(`email`, `role=admin`, `exp`). 1시간 유효하며 요청마다 `ADMIN_EMAILS`를 다시 확인합니다.
+  - `adm`: 관리자 세션(`email`, `role=admin`, `exp`). 8시간 유효하며 요청마다 `ADMIN_EMAILS`를 다시 확인합니다.
 - 관리자 로그인 경로(`/admin/callback`)는 42 API와 Apps Script `checkin`을 호출하지 않습니다. Google `email_verified`가 참인 이메일만 받습니다.
 - 결석 사유 폼은 쿠키 없이 `(login, 회차ID)`에 묶인 서명 토큰(30분)으로만 제출됩니다. 사유는 공백 정리 후 200자 제한, 시트에는 일반 텍스트 서식으로 써서 수식으로 해석되지 않습니다.
 - 응답에는 예외 메시지와 환경변수 이름이 들어가지 않습니다. 모든 페이지에 `Cache-Control: no-store`와 엄격한 CSP를 적용합니다.
